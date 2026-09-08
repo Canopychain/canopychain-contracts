@@ -463,3 +463,83 @@ fn full_lifecycle_multi_donor_deposit_configure_attest() {
     let result = s.client.try_attest_milestone(&0u64);
     assert_eq!(result, Err(Ok(Error::AllMilestonesComplete)));
 }
+
+#[test]
+fn pause_blocks_deposit_and_attest() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+    s.client
+        .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
+
+    s.client.pause();
+    assert!(s.client.paused());
+
+    let result = s.client.try_deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::ContractPaused)));
+}
+
+#[test]
+fn unpause_restores_normal_operation() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    s.client.pause();
+    s.client.unpause();
+    assert!(!s.client.paused());
+
+    let total = s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+    assert_eq!(total, 500);
+}
+
+#[test]
+fn set_attestor_rotates_attestor() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+
+    let new_attestor = Address::generate(&s.env);
+    s.client.set_attestor(&0u64, &new_attestor);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.attestor, new_attestor);
+}
+
+#[test]
+fn set_attestor_on_unknown_project_fails() {
+    let s = setup();
+    let new_attestor = Address::generate(&s.env);
+    let result = s.client.try_set_attestor(&0u64, &new_attestor);
+    assert_eq!(result, Err(Ok(Error::VaultNotFound)));
+}

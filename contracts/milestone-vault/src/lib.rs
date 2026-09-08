@@ -47,6 +47,7 @@ pub enum DataKey {
     Vault(u64),
     Donation(u64, Address),
     Schedule(u64),
+    Paused,
 }
 
 #[contracterror]
@@ -63,6 +64,7 @@ pub enum Error {
     InvalidSchedule = 8,
     ScheduleNotFound = 9,
     AllMilestonesComplete = 10,
+    ContractPaused = 11,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -104,6 +106,20 @@ fn extend_schedule_ttl(env: &Env, project_id: u64) {
         VAULT_LIFETIME_THRESHOLD,
         VAULT_BUMP_AMOUNT,
     );
+}
+
+/// Returns `Err(Error::ContractPaused)` if an admin has paused the vault.
+/// Checked at the top of every entry point that moves funds.
+fn require_not_paused(env: &Env) -> Result<(), Error> {
+    let paused: bool = env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false);
+    if paused {
+        return Err(Error::ContractPaused);
+    }
+    Ok(())
 }
 
 /// Basis-points denominator (10_000 bps = 100%).
@@ -195,6 +211,7 @@ impl MilestoneVault {
         token: Address,
         amount: i128,
     ) -> Result<i128, Error> {
+        require_not_paused(&env)?;
         donor.require_auth();
 
         if amount <= 0 {
@@ -292,6 +309,8 @@ impl MilestoneVault {
     /// call this. Releases that tranche's share of `total_deposited` to
     /// the recipient and advances `milestones_completed` by one.
     pub fn attest_milestone(env: Env, project_id: u64) -> Result<i128, Error> {
+        require_not_paused(&env)?;
+
         let vault_key = DataKey::Vault(project_id);
         let mut vault: ProjectVault = env
             .storage()
@@ -343,6 +362,73 @@ impl MilestoneVault {
         );
 
         Ok(payout)
+    }
+
+    /// Halts deposits and milestone attestations. Admin-gated emergency
+    /// brake. Existing vault balances and schedules are untouched, and
+    /// reads keep working — this only blocks fund movement.
+    pub fn pause(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        extend_instance_ttl(&env);
+        env.events().publish((symbol_short!("pause"),), ());
+        Ok(())
+    }
+
+    /// Lifts a pause, restoring normal operation. Admin-gated.
+    pub fn unpause(env: Env) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        extend_instance_ttl(&env);
+        env.events().publish((symbol_short!("unpause"),), ());
+        Ok(())
+    }
+
+    /// Whether the vault is currently paused.
+    pub fn paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
+    /// Rotates the attestor authorized to attest milestones for a project.
+    /// Admin-gated, so a compromised or retiring attestor key can be
+    /// replaced without needing anything from donors or the recipient.
+    pub fn set_attestor(env: Env, project_id: u64, new_attestor: Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        let key = DataKey::Vault(project_id);
+        let mut vault: ProjectVault = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::VaultNotFound)?;
+
+        vault.attestor = new_attestor;
+        env.storage().persistent().set(&key, &vault);
+        extend_instance_ttl(&env);
+        extend_vault_ttl(&env, project_id);
+
+        env.events()
+            .publish((symbol_short!("attestor"), project_id), ());
+
+        Ok(())
     }
 }
 
