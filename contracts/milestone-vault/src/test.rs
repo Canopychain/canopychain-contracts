@@ -391,3 +391,75 @@ fn attest_milestone_past_schedule_end_fails() {
     let result = s.client.try_attest_milestone(&0u64);
     assert_eq!(result, Err(Ok(Error::AllMilestonesComplete)));
 }
+
+#[test]
+fn full_lifecycle_multi_donor_deposit_configure_attest() {
+    let s = setup();
+    let donor_b = Address::generate(&s.env);
+    let donor_c = Address::generate(&s.env);
+    s.token_admin.mint(&s.donor, &1_000);
+    s.token_admin.mint(&donor_b, &1_000);
+    s.token_admin.mint(&donor_c, &1_000);
+
+    // Two donors fund the project before it's approved for milestones.
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &700,
+    );
+    s.client.deposit(
+        &donor_b,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &300,
+    );
+
+    s.client
+        .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
+
+    // Milestone 0: 30% of the 1,000 deposited so far.
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 300);
+    assert_eq!(s.token.balance(&s.recipient), 300);
+
+    // A third donor tops up the pool between milestones — later tranches
+    // are a share of the pool as it stands at attestation time, not a
+    // snapshot taken when the schedule was configured.
+    s.client.deposit(
+        &donor_c,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+
+    // Milestone 1: 30% of the now-1,500 pool.
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 450);
+    assert_eq!(s.token.balance(&s.recipient), 750);
+
+    // Milestone 2: final 40% of 1,500.
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 600);
+    assert_eq!(s.token.balance(&s.recipient), 1_350);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.milestones_completed, 3);
+    assert_eq!(vault.total_deposited, 1_500);
+    assert_eq!(vault.total_released, 1_350);
+
+    // Per-donor contributions are tracked independently of attestation and
+    // payout — the pool pays the recipient, not the donors individually.
+    assert_eq!(s.client.get_donation(&0u64, &s.donor), 700);
+    assert_eq!(s.client.get_donation(&0u64, &donor_b), 300);
+    assert_eq!(s.client.get_donation(&0u64, &donor_c), 500);
+
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::AllMilestonesComplete)));
+}
