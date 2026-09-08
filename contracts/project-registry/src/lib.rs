@@ -52,12 +52,17 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
 const PROJECT_BUMP_AMOUNT: u32 = 90 * DAY_IN_LEDGERS;
 const PROJECT_LIFETIME_THRESHOLD: u32 = PROJECT_BUMP_AMOUNT - DAY_IN_LEDGERS;
 
+/// Keeps the contract instance (admin, next-id counter) from being
+/// archived. Called on every state-changing entry point.
 fn extend_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 }
 
+/// Keeps a project's persistent entry alive past its last touch, so a
+/// slow-moving project doesn't get archived out from under its operator
+/// and donors between activity.
 fn extend_project_ttl(env: &Env, project_id: u64) {
     env.storage().persistent().extend_ttl(
         &DataKey::Project(project_id),
