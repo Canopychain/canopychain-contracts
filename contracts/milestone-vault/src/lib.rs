@@ -4,6 +4,8 @@ use soroban_sdk::{
     contract, contracterror, contracttype, contractimpl, symbol_short, token, Address, Env, Vec,
 };
 
+mod math;
+
 /// The pooled donor funds for a single reforestation project.
 ///
 /// Donors deposit into the pool named by `project_id`; there is no
@@ -317,8 +319,7 @@ impl MilestoneVault {
             .get(vault.milestones_completed)
             .ok_or(Error::AllMilestonesComplete)?;
 
-        let payout =
-            (vault.total_deposited * milestone.payout_bps as i128) / BPS_DENOMINATOR as i128;
+        let payout = math::tranche_payout(vault.total_deposited, milestone.payout_bps);
 
         vault.milestones_completed += 1;
         vault.total_released += payout;
