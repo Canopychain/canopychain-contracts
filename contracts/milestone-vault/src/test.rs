@@ -687,3 +687,138 @@ fn refund_splits_remaining_pool_proportionally_after_partial_release() {
     assert_eq!(s.token.balance(&donor_b), 910); // 1,000 - 300 + 210
     assert_eq!(s.token.balance(&s.recipient), 300); // untouched by refunds
 }
+
+#[test]
+fn attest_milestone_with_zero_payout_bps_transfers_nothing() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &1_000,
+    );
+
+    // A milestone that exists purely for donor-facing transparency of a
+    // waypoint, with no funds attached to it.
+    let schedule = Vec::from_array(
+        &s.env,
+        [
+            Milestone {
+                threshold_bps: 500,
+                payout_bps: 0,
+            },
+            Milestone {
+                threshold_bps: 1_000,
+                payout_bps: 10_000,
+            },
+        ],
+    );
+    s.client.configure_milestones(&0u64, &schedule);
+
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 0);
+    assert_eq!(s.token.balance(&s.recipient), 0);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.milestones_completed, 1);
+    assert_eq!(vault.total_released, 0);
+
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 1_000);
+    assert_eq!(s.token.balance(&s.recipient), 1_000);
+}
+
+#[test]
+fn refund_after_full_release_pays_nothing_but_does_not_error() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &1_000,
+    );
+    let full_payout = Vec::from_array(
+        &s.env,
+        [Milestone {
+            threshold_bps: 500,
+            payout_bps: 10_000,
+        }],
+    );
+    s.client.configure_milestones(&0u64, &full_payout);
+    s.client.attest_milestone(&0u64);
+    assert_eq!(s.token.balance(&s.recipient), 1_000);
+
+    // Cancelling after everything has already been released leaves nothing
+    // to claim, but refund should say so cleanly rather than error, since
+    // the donor didn't do anything wrong and there's no leftover to split.
+    s.client.cancel_project(&0u64);
+    let refunded = s.client.refund(&0u64, &s.donor);
+    assert_eq!(refunded, 0);
+    assert_eq!(s.token.balance(&s.donor), 0);
+}
+
+#[test]
+fn invariants_hold_across_a_grid_of_deposits_and_schedules() {
+    // Sweeps a grid of deposit amounts and tranche schedules (including
+    // ones whose bps don't evenly divide the deposit) through a full
+    // attest-to-completion lifecycle, checking the invariants that must
+    // hold regardless of input: released funds never exceed what was
+    // deposited, per-milestone payouts are never negative, and rounding
+    // never loses track of more than a few bps of dust.
+    let deposits = [1i128, 3, 100, 999, 10_000];
+    let schedules: [&[u32]; 3] = [&[10_000], &[5_000, 5_000], &[3_333, 3_333, 3_334]];
+
+    for &deposit_amount in &deposits {
+        for &payouts in &schedules {
+            let s = setup();
+            s.token_admin.mint(&s.donor, &deposit_amount);
+            s.client.deposit(
+                &s.donor,
+                &0u64,
+                &s.recipient,
+                &s.attestor,
+                &s.token.address,
+                &deposit_amount,
+            );
+
+            let mut milestones: Vec<Milestone> = Vec::new(&s.env);
+            for (i, &payout_bps) in payouts.iter().enumerate() {
+                milestones.push_back(Milestone {
+                    threshold_bps: (i as u32 + 1) * 100,
+                    payout_bps,
+                });
+            }
+            s.client.configure_milestones(&0u64, &milestones);
+
+            let mut released_total: i128 = 0;
+            for _ in payouts {
+                let payout = s.client.attest_milestone(&0u64);
+                assert!(payout >= 0, "negative payout for deposit={deposit_amount}");
+                released_total += payout;
+            }
+
+            assert!(
+                released_total <= deposit_amount,
+                "released more than deposited: deposit={deposit_amount} released={released_total}"
+            );
+            // Truncation on each tranche can leave a little dust behind,
+            // but never more than one unit per milestone in the schedule.
+            let max_dust = payouts.len() as i128;
+            assert!(
+                deposit_amount - released_total <= max_dust,
+                "too much dust left over: deposit={deposit_amount} released={released_total}"
+            );
+
+            let vault = s.client.get_vault(&0u64);
+            assert_eq!(vault.milestones_completed as usize, payouts.len());
+            assert_eq!(vault.total_released, released_total);
+            assert_eq!(s.token.balance(&s.recipient), released_total);
+        }
+    }
+}
