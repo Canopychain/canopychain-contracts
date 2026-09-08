@@ -287,9 +287,9 @@ impl MilestoneVault {
     /// Confirms that the next milestone in a project's schedule has been
     /// reached. Attestor-gated — the attestor recorded against the vault
     /// (set on the project's first deposit) is the only address that can
-    /// call this. Advances `milestones_completed` by one; the actual
-    /// tranche payout is computed and released in a later step.
-    pub fn attest_milestone(env: Env, project_id: u64) -> Result<u32, Error> {
+    /// call this. Releases that tranche's share of `total_deposited` to
+    /// the recipient and advances `milestones_completed` by one.
+    pub fn attest_milestone(env: Env, project_id: u64) -> Result<i128, Error> {
         let vault_key = DataKey::Vault(project_id);
         let mut vault: ProjectVault = env
             .storage()
@@ -313,18 +313,35 @@ impl MilestoneVault {
             return Err(Error::AllMilestonesComplete);
         }
 
+        let milestone = schedule
+            .get(vault.milestones_completed)
+            .ok_or(Error::AllMilestonesComplete)?;
+
+        let payout =
+            (vault.total_deposited * milestone.payout_bps as i128) / BPS_DENOMINATOR as i128;
+
         vault.milestones_completed += 1;
+        vault.total_released += payout;
         env.storage().persistent().set(&vault_key, &vault);
 
         extend_instance_ttl(&env);
         extend_vault_ttl(&env, project_id);
 
+        if payout > 0 {
+            let token_client = token::Client::new(&env, &vault.token);
+            token_client.transfer(&env.current_contract_address(), &vault.recipient, &payout);
+        }
+
         env.events().publish(
-            (symbol_short!("attested"), project_id),
-            vault.milestones_completed,
+            (
+                symbol_short!("attested"),
+                project_id,
+                vault.milestones_completed,
+            ),
+            payout,
         );
 
-        Ok(vault.milestones_completed)
+        Ok(payout)
     }
 }
 

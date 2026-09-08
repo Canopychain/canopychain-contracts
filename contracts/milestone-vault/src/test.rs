@@ -306,7 +306,7 @@ fn configure_milestones_rejects_non_increasing_thresholds() {
 }
 
 #[test]
-fn attest_milestone_advances_count() {
+fn attest_milestone_releases_tranche_to_recipient() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
     s.client.deposit(
@@ -320,14 +320,29 @@ fn attest_milestone_advances_count() {
     s.client
         .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
 
-    let completed = s.client.attest_milestone(&0u64);
-    assert_eq!(completed, 1);
+    // Milestone 0: 30% of 1,000 = 300.
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 300);
+    assert_eq!(s.token.balance(&s.recipient), 300);
 
     let vault = s.client.get_vault(&0u64);
     assert_eq!(vault.milestones_completed, 1);
+    assert_eq!(vault.total_released, 300);
+    assert_eq!(vault.total_deposited, 1_000); // deposits aren't drawn down
 
-    let completed = s.client.attest_milestone(&0u64);
-    assert_eq!(completed, 2);
+    // Milestone 1: another 30% of the original 1,000 = 300.
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 300);
+    assert_eq!(s.token.balance(&s.recipient), 600);
+
+    // Milestone 2: final 40% = 400, bringing the recipient to the full 1,000.
+    let payout = s.client.attest_milestone(&0u64);
+    assert_eq!(payout, 400);
+    assert_eq!(s.token.balance(&s.recipient), 1_000);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.milestones_completed, 3);
+    assert_eq!(vault.total_released, 1_000);
 }
 
 #[test]
