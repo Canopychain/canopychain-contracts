@@ -2,8 +2,28 @@
 
 use super::*;
 use soroban_sdk::testutils::Address as _;
+use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
 
-fn setup() -> (Env, MilestoneVaultClient<'static>, Address) {
+fn create_token<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, StellarAssetClient<'a>) {
+    let sac = env.register_stellar_asset_contract_v2(admin.clone());
+    (
+        TokenClient::new(env, &sac.address()),
+        StellarAssetClient::new(env, &sac.address()),
+    )
+}
+
+struct Setup<'a> {
+    env: Env,
+    client: MilestoneVaultClient<'a>,
+    admin: Address,
+    token: TokenClient<'a>,
+    token_admin: StellarAssetClient<'a>,
+    donor: Address,
+    recipient: Address,
+    attestor: Address,
+}
+
+fn setup() -> Setup<'static> {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -13,25 +33,176 @@ fn setup() -> (Env, MilestoneVaultClient<'static>, Address) {
     let admin = Address::generate(&env);
     client.init(&admin);
 
-    (env, client, admin)
+    let token_issuer = Address::generate(&env);
+    let (token, token_admin) = create_token(&env, &token_issuer);
+
+    let donor = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let attestor = Address::generate(&env);
+
+    Setup {
+        env,
+        client,
+        admin,
+        token,
+        token_admin,
+        donor,
+        recipient,
+        attestor,
+    }
 }
 
 #[test]
 fn init_sets_admin() {
-    let (_env, client, admin) = setup();
-    assert_eq!(client.admin(), admin);
+    let s = setup();
+    assert_eq!(s.client.admin(), s.admin);
 }
 
 #[test]
 fn double_init_fails() {
-    let (_env, client, admin) = setup();
-    let result = client.try_init(&admin);
+    let s = setup();
+    let result = s.client.try_init(&s.admin);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
 }
 
 #[test]
 fn get_unknown_vault_fails() {
-    let (_env, client, _admin) = setup();
-    let result = client.try_get_vault(&0u64);
+    let s = setup();
+    let result = s.client.try_get_vault(&0u64);
     assert_eq!(result, Err(Ok(Error::VaultNotFound)));
+}
+
+#[test]
+fn first_deposit_opens_vault() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let total = s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &600,
+    );
+    assert_eq!(total, 600);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.recipient, s.recipient);
+    assert_eq!(vault.attestor, s.attestor);
+    assert_eq!(vault.total_deposited, 600);
+    assert_eq!(vault.total_released, 0);
+    assert_eq!(vault.milestones_completed, 0);
+    assert_eq!(vault.cancelled, false);
+
+    assert_eq!(s.token.balance(&s.donor), 400);
+    assert_eq!(s.token.balance(&s.client.address), 600);
+    assert_eq!(s.client.get_donation(&0u64, &s.donor), 600);
+}
+
+#[test]
+fn second_deposit_tops_up_and_ignores_new_recipient_attestor() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &400,
+    );
+
+    let other_recipient = Address::generate(&s.env);
+    let other_attestor = Address::generate(&s.env);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &other_recipient,
+        &other_attestor,
+        &s.token.address,
+        &200,
+    );
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.total_deposited, 600);
+    assert_eq!(vault.recipient, s.recipient);
+    assert_eq!(vault.attestor, s.attestor);
+    assert_eq!(s.client.get_donation(&0u64, &s.donor), 600);
+}
+
+#[test]
+fn deposit_rejects_non_positive_amount() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let result = s.client.try_deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &0,
+    );
+    assert_eq!(result, Err(Ok(Error::InvalidAmount)));
+}
+
+#[test]
+fn deposit_rejects_token_mismatch_on_top_up() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &100,
+    );
+
+    let other_issuer = Address::generate(&s.env);
+    let (other_token, other_token_admin) = create_token(&s.env, &other_issuer);
+    other_token_admin.mint(&s.donor, &1_000);
+
+    let result = s.client.try_deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &other_token.address,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(Error::TokenMismatch)));
+}
+
+#[test]
+fn deposits_from_different_donors_pool_together() {
+    let s = setup();
+    let donor_two = Address::generate(&s.env);
+    s.token_admin.mint(&s.donor, &1_000);
+    s.token_admin.mint(&donor_two, &1_000);
+
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &300,
+    );
+    s.client.deposit(
+        &donor_two,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.total_deposited, 800);
+    assert_eq!(s.client.get_donation(&0u64, &s.donor), 300);
+    assert_eq!(s.client.get_donation(&0u64, &donor_two), 500);
 }
