@@ -80,12 +80,17 @@ const INSTANCE_LIFETIME_THRESHOLD: u32 = INSTANCE_BUMP_AMOUNT - DAY_IN_LEDGERS;
 const VAULT_BUMP_AMOUNT: u32 = 90 * DAY_IN_LEDGERS;
 const VAULT_LIFETIME_THRESHOLD: u32 = VAULT_BUMP_AMOUNT - DAY_IN_LEDGERS;
 
+/// Keeps the contract instance (admin, pause flag) from being archived.
+/// Called on every state-changing entry point.
 fn extend_instance_ttl(env: &Env) {
     env.storage()
         .instance()
         .extend_ttl(INSTANCE_LIFETIME_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 }
 
+/// Keeps a project's vault entry alive past its last touch, so a
+/// slow-progressing project doesn't get archived out from under its
+/// donors and recipient between activity.
 fn extend_vault_ttl(env: &Env, project_id: u64) {
     env.storage().persistent().extend_ttl(
         &DataKey::Vault(project_id),
@@ -94,6 +99,9 @@ fn extend_vault_ttl(env: &Env, project_id: u64) {
     );
 }
 
+/// Keeps a donor's per-project contribution record alive past its last
+/// touch, so it's still there to compute a refund share against if the
+/// project is later cancelled.
 fn extend_donation_ttl(env: &Env, project_id: u64, donor: &Address) {
     env.storage().persistent().extend_ttl(
         &DataKey::Donation(project_id, donor.clone()),
@@ -102,6 +110,7 @@ fn extend_donation_ttl(env: &Env, project_id: u64, donor: &Address) {
     );
 }
 
+/// Keeps a project's milestone schedule alive past its last touch.
 fn extend_schedule_ttl(env: &Env, project_id: u64) {
     env.storage().persistent().extend_ttl(
         &DataKey::Schedule(project_id),
