@@ -65,6 +65,8 @@ pub enum Error {
     ScheduleNotFound = 9,
     AllMilestonesComplete = 10,
     ContractPaused = 11,
+    NotCancelled = 12,
+    NothingToRefund = 13,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -429,6 +431,86 @@ impl MilestoneVault {
             .publish((symbol_short!("attestor"), project_id), ());
 
         Ok(())
+    }
+
+    /// Cancels a project's vault. Admin-gated — this is for projects that
+    /// stall or fail to progress (satellite data never confirms growth, the
+    /// operator abandons the plot), not something a single donor can
+    /// trigger unilaterally against a pool other donors also contributed
+    /// to. Blocks further deposits and attestations; whatever hasn't been
+    /// released yet becomes claimable by donors via `refund`.
+    pub fn cancel_project(env: Env, project_id: u64) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        let key = DataKey::Vault(project_id);
+        let mut vault: ProjectVault = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(Error::VaultNotFound)?;
+
+        vault.cancelled = true;
+        env.storage().persistent().set(&key, &vault);
+        extend_instance_ttl(&env);
+        extend_vault_ttl(&env, project_id);
+
+        env.events()
+            .publish((symbol_short!("cancelled"), project_id), ());
+
+        Ok(())
+    }
+
+    /// Claims a donor's share of what's left in a cancelled project's pool.
+    /// Donor-auth-gated, and pull-based (each donor claims their own share
+    /// rather than the contract pushing to everyone at once) since there's
+    /// no way to enumerate every donor to a project in one call. The share
+    /// is `donation / total_deposited` of whatever wasn't released before
+    /// cancellation, so it doesn't matter what order donors claim in — the
+    /// shares always add up to what's actually left. Zeroes the donor's
+    /// recorded donation on success so a second call has nothing to pay.
+    pub fn refund(env: Env, project_id: u64, donor: Address) -> Result<i128, Error> {
+        donor.require_auth();
+
+        let vault: ProjectVault = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vault(project_id))
+            .ok_or(Error::VaultNotFound)?;
+
+        if !vault.cancelled {
+            return Err(Error::NotCancelled);
+        }
+
+        let donation_key = DataKey::Donation(project_id, donor.clone());
+        let donation: i128 = env.storage().persistent().get(&donation_key).unwrap_or(0);
+        if donation <= 0 {
+            return Err(Error::NothingToRefund);
+        }
+
+        let remaining = vault.total_deposited - vault.total_released;
+        let refund_amount =
+            math::proportional_share(donation, remaining, vault.total_deposited);
+
+        env.storage().persistent().set(&donation_key, &0i128);
+        extend_instance_ttl(&env);
+        extend_donation_ttl(&env, project_id, &donor);
+
+        if refund_amount > 0 {
+            let token_client = token::Client::new(&env, &vault.token);
+            token_client.transfer(&env.current_contract_address(), &donor, &refund_amount);
+        }
+
+        env.events().publish(
+            (symbol_short!("refund"), project_id, donor),
+            refund_amount,
+        );
+
+        Ok(refund_amount)
     }
 }
 

@@ -543,3 +543,147 @@ fn set_attestor_on_unknown_project_fails() {
     let result = s.client.try_set_attestor(&0u64, &new_attestor);
     assert_eq!(result, Err(Ok(Error::VaultNotFound)));
 }
+
+#[test]
+fn cancel_blocks_deposit_and_attest() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+    s.client
+        .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
+
+    s.client.cancel_project(&0u64);
+
+    let vault = s.client.get_vault(&0u64);
+    assert!(vault.cancelled);
+
+    let result = s.client.try_deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &100,
+    );
+    assert_eq!(result, Err(Ok(Error::VaultCancelled)));
+
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::VaultCancelled)));
+}
+
+#[test]
+fn cancel_unknown_project_fails() {
+    let s = setup();
+    let result = s.client.try_cancel_project(&0u64);
+    assert_eq!(result, Err(Ok(Error::VaultNotFound)));
+}
+
+#[test]
+fn refund_before_cancel_fails() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+
+    let result = s.client.try_refund(&0u64, &s.donor);
+    assert_eq!(result, Err(Ok(Error::NotCancelled)));
+}
+
+#[test]
+fn refund_with_no_donation_fails() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+    s.client.cancel_project(&0u64);
+
+    let stranger = Address::generate(&s.env);
+    let result = s.client.try_refund(&0u64, &stranger);
+    assert_eq!(result, Err(Ok(Error::NothingToRefund)));
+}
+
+#[test]
+fn refund_returns_full_amount_when_nothing_released() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+    s.client.cancel_project(&0u64);
+
+    let refunded = s.client.refund(&0u64, &s.donor);
+    assert_eq!(refunded, 500);
+    assert_eq!(s.token.balance(&s.donor), 500); // 1,000 minted - 500 deposited + 500 refunded
+
+    // A second claim has nothing left to pay out.
+    let result = s.client.try_refund(&0u64, &s.donor);
+    assert_eq!(result, Err(Ok(Error::NothingToRefund)));
+}
+
+#[test]
+fn refund_splits_remaining_pool_proportionally_after_partial_release() {
+    let s = setup();
+    let donor_b = Address::generate(&s.env);
+    s.token_admin.mint(&s.donor, &1_000);
+    s.token_admin.mint(&donor_b, &1_000);
+
+    // Donor A gives 700, donor B gives 300 -> 1,000 total.
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &700,
+    );
+    s.client.deposit(
+        &donor_b,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &300,
+    );
+
+    s.client
+        .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
+
+    // First milestone releases 30% (300) to the recipient before the
+    // project stalls and gets cancelled; 700 remains in the pool.
+    s.client.attest_milestone(&0u64);
+    s.client.cancel_project(&0u64);
+
+    // Donor A gets 70% of the 700 remaining = 490; donor B gets 30% = 210.
+    let refunded_a = s.client.refund(&0u64, &s.donor);
+    assert_eq!(refunded_a, 490);
+    let refunded_b = s.client.refund(&0u64, &donor_b);
+    assert_eq!(refunded_b, 210);
+
+    assert_eq!(s.token.balance(&s.donor), 790); // 1,000 - 700 + 490
+    assert_eq!(s.token.balance(&donor_b), 910); // 1,000 - 300 + 210
+    assert_eq!(s.token.balance(&s.recipient), 300); // untouched by refunds
+}

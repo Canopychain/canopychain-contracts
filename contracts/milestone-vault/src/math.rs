@@ -16,9 +16,28 @@ pub fn tranche_payout(total_deposited: i128, payout_bps: u32) -> i128 {
     payout.min(total_deposited)
 }
 
+/// Computes `part`'s proportional share of `remaining`, where `part` is
+/// out of `total`. Used to split what's left in a cancelled vault fairly
+/// across donors based on how much each contributed, regardless of the
+/// order they claim their refund in.
+///
+/// Returns 0 if any input is non-positive, and saturates instead of
+/// overflowing/panicking if `part * remaining` would exceed i128's range.
+/// Capped at `remaining` so rounding can never hand out more than what's
+/// actually left to refund.
+pub fn proportional_share(part: i128, remaining: i128, total: i128) -> i128 {
+    if total <= 0 || part <= 0 || remaining <= 0 {
+        return 0;
+    }
+
+    let scaled = part.saturating_mul(remaining);
+    let share = scaled / total;
+    share.min(remaining)
+}
+
 #[cfg(test)]
 mod test {
-    use super::tranche_payout;
+    use super::{proportional_share, tranche_payout};
 
     #[test]
     fn zero_deposited_pays_nothing() {
@@ -87,6 +106,60 @@ mod test {
                     "payout decreased as bps grew: deposited={deposited} bps={bps}"
                 );
                 prev = payout;
+            }
+        }
+    }
+
+    #[test]
+    fn zero_total_shares_nothing() {
+        assert_eq!(proportional_share(100, 500, 0), 0);
+    }
+
+    #[test]
+    fn zero_or_negative_part_shares_nothing() {
+        assert_eq!(proportional_share(0, 500, 1_000), 0);
+        assert_eq!(proportional_share(-50, 500, 1_000), 0);
+    }
+
+    #[test]
+    fn zero_remaining_shares_nothing() {
+        assert_eq!(proportional_share(300, 0, 1_000), 0);
+    }
+
+    #[test]
+    fn full_part_gets_all_of_remaining() {
+        assert_eq!(proportional_share(1_000, 500, 1_000), 500);
+    }
+
+    #[test]
+    fn splits_proportionally_across_donors() {
+        // Donor A gave 700 of 1,000 total; 400 is left to refund.
+        assert_eq!(proportional_share(700, 400, 1_000), 280);
+        // Donor B gave the other 300 of 1,000.
+        assert_eq!(proportional_share(300, 400, 1_000), 120);
+        // The two shares add up to the full remaining amount.
+        assert_eq!(280 + 120, 400);
+    }
+
+    #[test]
+    fn saturates_instead_of_overflowing() {
+        let share = proportional_share(i128::MAX, i128::MAX, 1);
+        assert_eq!(share, i128::MAX);
+    }
+
+    #[test]
+    fn never_exceeds_remaining() {
+        let parts = [1i128, 100, 999, 1_000, i128::MAX];
+        let remainders = [0i128, 1, 500, 1_000, i128::MAX];
+        let totals = [1i128, 1_000, i128::MAX];
+
+        for &part in &parts {
+            for &remaining in &remainders {
+                for &total in &totals {
+                    let share = proportional_share(part, remaining, total);
+                    assert!(share >= 0);
+                    assert!(share <= remaining);
+                }
             }
         }
     }
