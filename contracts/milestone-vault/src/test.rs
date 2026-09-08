@@ -304,3 +304,75 @@ fn configure_milestones_rejects_non_increasing_thresholds() {
     let result = s.client.try_configure_milestones(&0u64, &schedule);
     assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
 }
+
+#[test]
+fn attest_milestone_advances_count() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &1_000,
+    );
+    s.client
+        .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
+
+    let completed = s.client.attest_milestone(&0u64);
+    assert_eq!(completed, 1);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.milestones_completed, 1);
+
+    let completed = s.client.attest_milestone(&0u64);
+    assert_eq!(completed, 2);
+}
+
+#[test]
+fn attest_milestone_without_vault_fails() {
+    let s = setup();
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::VaultNotFound)));
+}
+
+#[test]
+fn attest_milestone_without_schedule_fails() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &1_000,
+    );
+
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::ScheduleNotFound)));
+}
+
+#[test]
+fn attest_milestone_past_schedule_end_fails() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &1_000,
+    );
+    s.client
+        .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
+
+    s.client.attest_milestone(&0u64);
+    s.client.attest_milestone(&0u64);
+    s.client.attest_milestone(&0u64);
+
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::AllMilestonesComplete)));
+}

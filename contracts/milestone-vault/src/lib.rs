@@ -60,6 +60,7 @@ pub enum Error {
     ScheduleAlreadySet = 7,
     InvalidSchedule = 8,
     ScheduleNotFound = 9,
+    AllMilestonesComplete = 10,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -281,6 +282,49 @@ impl MilestoneVault {
             .persistent()
             .get(&DataKey::Schedule(project_id))
             .ok_or(Error::ScheduleNotFound)
+    }
+
+    /// Confirms that the next milestone in a project's schedule has been
+    /// reached. Attestor-gated — the attestor recorded against the vault
+    /// (set on the project's first deposit) is the only address that can
+    /// call this. Advances `milestones_completed` by one; the actual
+    /// tranche payout is computed and released in a later step.
+    pub fn attest_milestone(env: Env, project_id: u64) -> Result<u32, Error> {
+        let vault_key = DataKey::Vault(project_id);
+        let mut vault: ProjectVault = env
+            .storage()
+            .persistent()
+            .get(&vault_key)
+            .ok_or(Error::VaultNotFound)?;
+
+        vault.attestor.require_auth();
+
+        if vault.cancelled {
+            return Err(Error::VaultCancelled);
+        }
+
+        let schedule: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Schedule(project_id))
+            .ok_or(Error::ScheduleNotFound)?;
+
+        if vault.milestones_completed >= schedule.len() {
+            return Err(Error::AllMilestonesComplete);
+        }
+
+        vault.milestones_completed += 1;
+        env.storage().persistent().set(&vault_key, &vault);
+
+        extend_instance_ttl(&env);
+        extend_vault_ttl(&env, project_id);
+
+        env.events().publish(
+            (symbol_short!("attested"), project_id),
+            vault.milestones_completed,
+        );
+
+        Ok(vault.milestones_completed)
     }
 }
 
