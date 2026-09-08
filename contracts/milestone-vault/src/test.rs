@@ -206,3 +206,101 @@ fn deposits_from_different_donors_pool_together() {
     assert_eq!(s.client.get_donation(&0u64, &s.donor), 300);
     assert_eq!(s.client.get_donation(&0u64, &donor_two), 500);
 }
+
+fn three_tranche_schedule(env: &Env) -> Vec<Milestone> {
+    Vec::from_array(
+        env,
+        [
+            Milestone {
+                threshold_bps: 500,
+                payout_bps: 3_000,
+            },
+            Milestone {
+                threshold_bps: 1_000,
+                payout_bps: 3_000,
+            },
+            Milestone {
+                threshold_bps: 2_000,
+                payout_bps: 4_000,
+            },
+        ],
+    )
+}
+
+#[test]
+fn configure_milestones_stores_schedule() {
+    let s = setup();
+    let schedule = three_tranche_schedule(&s.env);
+
+    s.client.configure_milestones(&0u64, &schedule);
+
+    let stored = s.client.get_schedule(&0u64);
+    assert_eq!(stored.len(), 3);
+    assert_eq!(stored.get(0).unwrap().payout_bps, 3_000);
+    assert_eq!(stored.get(2).unwrap().threshold_bps, 2_000);
+}
+
+#[test]
+fn configure_milestones_twice_fails() {
+    let s = setup();
+    let schedule = three_tranche_schedule(&s.env);
+
+    s.client.configure_milestones(&0u64, &schedule);
+    let result = s.client.try_configure_milestones(&0u64, &schedule);
+    assert_eq!(result, Err(Ok(Error::ScheduleAlreadySet)));
+}
+
+#[test]
+fn get_schedule_before_configure_fails() {
+    let s = setup();
+    let result = s.client.try_get_schedule(&0u64);
+    assert_eq!(result, Err(Ok(Error::ScheduleNotFound)));
+}
+
+#[test]
+fn configure_milestones_rejects_empty_schedule() {
+    let s = setup();
+    let empty: Vec<Milestone> = Vec::new(&s.env);
+    let result = s.client.try_configure_milestones(&0u64, &empty);
+    assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}
+
+#[test]
+fn configure_milestones_rejects_payouts_over_100_percent() {
+    let s = setup();
+    let schedule = Vec::from_array(
+        &s.env,
+        [
+            Milestone {
+                threshold_bps: 500,
+                payout_bps: 6_000,
+            },
+            Milestone {
+                threshold_bps: 1_000,
+                payout_bps: 5_000,
+            },
+        ],
+    );
+    let result = s.client.try_configure_milestones(&0u64, &schedule);
+    assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}
+
+#[test]
+fn configure_milestones_rejects_non_increasing_thresholds() {
+    let s = setup();
+    let schedule = Vec::from_array(
+        &s.env,
+        [
+            Milestone {
+                threshold_bps: 1_000,
+                payout_bps: 3_000,
+            },
+            Milestone {
+                threshold_bps: 1_000,
+                payout_bps: 3_000,
+            },
+        ],
+    );
+    let result = s.client.try_configure_milestones(&0u64, &schedule);
+    assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}

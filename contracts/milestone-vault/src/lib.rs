@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contracttype, contractimpl, symbol_short, token, Address, Env,
+    contract, contracterror, contracttype, contractimpl, symbol_short, token, Address, Env, Vec,
 };
 
 /// The pooled donor funds for a single reforestation project.
@@ -22,12 +22,29 @@ pub struct ProjectVault {
     pub cancelled: bool,
 }
 
+/// One tranche of a project's release schedule.
+///
+/// `threshold_bps` is the cumulative forest-cover-change (in basis points
+/// of plot area) the backend's satellite check must confirm before the
+/// attestor will attest this milestone; it's recorded on-chain purely for
+/// donor-facing transparency and isn't checked by the contract itself,
+/// which has no way to verify satellite data. `payout_bps` is the share of
+/// `total_deposited` released to the recipient when this milestone is
+/// attested.
+#[contracttype]
+#[derive(Clone)]
+pub struct Milestone {
+    pub threshold_bps: u32,
+    pub payout_bps: u32,
+}
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
     Admin,
     Vault(u64),
     Donation(u64, Address),
+    Schedule(u64),
 }
 
 #[contracterror]
@@ -40,6 +57,9 @@ pub enum Error {
     InvalidAmount = 4,
     TokenMismatch = 5,
     VaultCancelled = 6,
+    ScheduleAlreadySet = 7,
+    InvalidSchedule = 8,
+    ScheduleNotFound = 9,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -73,6 +93,49 @@ fn extend_donation_ttl(env: &Env, project_id: u64, donor: &Address) {
         VAULT_LIFETIME_THRESHOLD,
         VAULT_BUMP_AMOUNT,
     );
+}
+
+fn extend_schedule_ttl(env: &Env, project_id: u64) {
+    env.storage().persistent().extend_ttl(
+        &DataKey::Schedule(project_id),
+        VAULT_LIFETIME_THRESHOLD,
+        VAULT_BUMP_AMOUNT,
+    );
+}
+
+/// Basis-points denominator (10_000 bps = 100%).
+const BPS_DENOMINATOR: u32 = 10_000;
+
+/// Rejects an empty schedule, a schedule whose payouts sum to more than
+/// 100%, or one whose thresholds don't strictly increase (a project should
+/// need more forest-cover change to unlock each later tranche, never less
+/// or the same).
+fn validate_schedule(milestones: &Vec<Milestone>) -> Result<(), Error> {
+    if milestones.is_empty() {
+        return Err(Error::InvalidSchedule);
+    }
+
+    let mut payout_total: u32 = 0;
+    let mut prev_threshold: Option<u32> = None;
+    for milestone in milestones.iter() {
+        if let Some(prev) = prev_threshold {
+            if milestone.threshold_bps <= prev {
+                return Err(Error::InvalidSchedule);
+            }
+        }
+        prev_threshold = Some(milestone.threshold_bps);
+
+        payout_total = match payout_total.checked_add(milestone.payout_bps) {
+            Some(total) => total,
+            None => return Err(Error::InvalidSchedule),
+        };
+    }
+
+    if payout_total > BPS_DENOMINATOR {
+        return Err(Error::InvalidSchedule);
+    }
+
+    Ok(())
 }
 
 #[contract]
@@ -178,6 +241,46 @@ impl MilestoneVault {
         );
 
         Ok(vault.total_deposited)
+    }
+
+    /// Sets a project's tranche-release schedule. Admin-only, and callable
+    /// only once per project — the schedule donors funded against can't be
+    /// quietly changed underneath them after the fact.
+    pub fn configure_milestones(
+        env: Env,
+        project_id: u64,
+        milestones: Vec<Milestone>,
+    ) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        let key = DataKey::Schedule(project_id);
+        if env.storage().persistent().has(&key) {
+            return Err(Error::ScheduleAlreadySet);
+        }
+
+        validate_schedule(&milestones)?;
+
+        env.storage().persistent().set(&key, &milestones);
+        extend_instance_ttl(&env);
+        extend_schedule_ttl(&env, project_id);
+
+        env.events()
+            .publish((symbol_short!("schedule"), project_id), milestones.len());
+
+        Ok(())
+    }
+
+    /// Reads back a project's tranche-release schedule.
+    pub fn get_schedule(env: Env, project_id: u64) -> Result<Vec<Milestone>, Error> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Schedule(project_id))
+            .ok_or(Error::ScheduleNotFound)
     }
 }
 
