@@ -27,8 +27,11 @@ pub struct Project {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    /// The admin address. Instance storage.
     Admin,
+    /// The next project id to be assigned. Instance storage.
     NextProjectId,
+    /// A registered project, keyed by its project id. Persistent storage.
     Project(u64),
 }
 
