@@ -43,10 +43,17 @@ pub struct Milestone {
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
+    /// The admin address. Instance storage.
     Admin,
+    /// A project's pooled donor funds, keyed by project id. Persistent storage.
     Vault(u64),
+    /// A single donor's contribution to a project, keyed by
+    /// `(project_id, donor)`. Persistent storage.
     Donation(u64, Address),
+    /// A project's milestone release schedule, keyed by project id.
+    /// Persistent storage.
     Schedule(u64),
+    /// Whether the contract is paused. Instance storage.
     Paused,
 }
 
