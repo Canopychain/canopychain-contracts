@@ -92,6 +92,24 @@ fn approve_project_marks_approved() {
 }
 
 #[test]
+fn approve_project_twice_succeeds_and_stays_approved() {
+    let (env, client, _admin) = setup();
+    let operator = Address::generate(&env);
+    let recipient = Address::generate(&env);
+    let attestor = Address::generate(&env);
+    let name = String::from_str(&env, "Plot");
+    let polygon_hash = dummy_hash(&env);
+    let project_id = client.register(&operator, &recipient, &attestor, &polygon_hash, &name);
+
+    client.approve_project(&project_id);
+    let result = client.try_approve_project(&project_id);
+    assert_eq!(result, Ok(Ok(())));
+
+    let project = client.get_project(&project_id);
+    assert!(project.approved);
+}
+
+#[test]
 fn approve_unregistered_project_fails() {
     let (_env, client, _admin) = setup();
     let result = client.try_approve_project(&99u64);
