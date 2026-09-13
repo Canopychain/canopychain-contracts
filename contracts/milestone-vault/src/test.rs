@@ -905,3 +905,70 @@ fn refund_invariants_hold_across_a_grid_of_donors_and_partial_releases() {
         }
     }
 }
+
+#[test]
+fn schedule_summing_under_100_percent_leaves_remainder_stuck_in_vault() {
+    // validate_schedule accepts a schedule whose payouts total less than
+    // 100% — it's a legal configuration for a project that, say, only
+    // commits to paying out for the milestones it's confident it'll hit.
+    // Running it to completion shouldn't pay the recipient the full pool;
+    // whatever fraction the schedule never promised stays behind in the
+    // vault, with no further schedule step able to release it.
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &1_000,
+    );
+
+    // Totals 8,000 bps (80%) — 20% is deliberately left unscheduled.
+    let schedule = Vec::from_array(
+        &s.env,
+        [
+            Milestone {
+                threshold_bps: 500,
+                payout_bps: 2_000,
+            },
+            Milestone {
+                threshold_bps: 1_000,
+                payout_bps: 3_000,
+            },
+            Milestone {
+                threshold_bps: 1_500,
+                payout_bps: 3_000,
+            },
+        ],
+    );
+    s.client.configure_milestones(&0u64, &schedule);
+
+    s.client.attest_milestone(&0u64);
+    s.client.attest_milestone(&0u64);
+    s.client.attest_milestone(&0u64);
+
+    // 80% of the 1,000 deposited reached the recipient...
+    assert_eq!(s.token.balance(&s.recipient), 800);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.milestones_completed, 3);
+    assert_eq!(vault.total_deposited, 1_000);
+    assert_eq!(vault.total_released, 800);
+
+    // ...and the schedule is exhausted, so nothing can release the rest.
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::AllMilestonesComplete)));
+
+    // The other 20% just sits in the contract's balance, unreachable
+    // through the normal milestone path.
+    assert_eq!(s.token.balance(&s.client.address), 200);
+
+    // The only way out for that remainder is cancellation, at which point
+    // it becomes the unreleased balance donors can refund.
+    s.client.cancel_project(&0u64);
+    let refunded = s.client.refund(&0u64, &s.donor);
+    assert_eq!(refunded, 200);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
