@@ -822,3 +822,86 @@ fn invariants_hold_across_a_grid_of_deposits_and_schedules() {
         }
     }
 }
+
+#[test]
+fn refund_invariants_hold_across_a_grid_of_donors_and_partial_releases() {
+    // The property that matters for refunds isn't any single donor's split
+    // — it's that no matter how many donors there are, how they split the
+    // pool, or how far the schedule got before cancellation, the total they
+    // can claim back together never exceeds what cancellation actually left
+    // in the vault.
+    let donor_splits: [&[i128]; 4] = [
+        &[700, 300],
+        &[1, 1, 1],
+        &[999, 1],
+        &[3_333, 3_333, 3_334],
+    ];
+    let schedules: [&[u32]; 3] = [&[10_000], &[5_000, 5_000], &[3_333, 3_333, 3_334]];
+
+    for &splits in &donor_splits {
+        for &payouts in &schedules {
+            for milestones_before_cancel in 0..=payouts.len() {
+                let s = setup();
+
+                let mut donors: Vec<Address> = Vec::new(&s.env);
+                for &amount in splits {
+                    let donor = Address::generate(&s.env);
+                    s.token_admin.mint(&donor, &amount);
+                    s.client.deposit(
+                        &donor,
+                        &0u64,
+                        &s.recipient,
+                        &s.attestor,
+                        &s.token.address,
+                        &amount,
+                    );
+                    donors.push_back(donor);
+                }
+
+                let mut milestones: Vec<Milestone> = Vec::new(&s.env);
+                for (i, &payout_bps) in payouts.iter().enumerate() {
+                    milestones.push_back(Milestone {
+                        threshold_bps: (i as u32 + 1) * 100,
+                        payout_bps,
+                    });
+                }
+                s.client.configure_milestones(&0u64, &milestones);
+
+                for _ in 0..milestones_before_cancel {
+                    s.client.attest_milestone(&0u64);
+                }
+                s.client.cancel_project(&0u64);
+
+                let vault = s.client.get_vault(&0u64);
+                let unreleased = vault.total_deposited - vault.total_released;
+
+                let mut total_refunded: i128 = 0;
+                for donor in donors.iter() {
+                    let refunded = s.client.refund(&0u64, &donor);
+                    assert!(
+                        refunded >= 0,
+                        "negative refund: splits={splits:?} payouts={payouts:?}"
+                    );
+                    total_refunded += refunded;
+                }
+
+                assert!(
+                    total_refunded <= unreleased,
+                    "refunds exceeded unreleased balance: splits={splits:?} payouts={payouts:?} \
+                     milestones_before_cancel={milestones_before_cancel} \
+                     total_refunded={total_refunded} unreleased={unreleased}"
+                );
+
+                // Per-donor rounding can leave a little dust unclaimed, but
+                // never more than a unit per donor.
+                let max_dust = donors.len() as i128;
+                assert!(
+                    unreleased - total_refunded <= max_dust,
+                    "too much dust left unclaimed: splits={splits:?} payouts={payouts:?} \
+                     milestones_before_cancel={milestones_before_cancel} \
+                     total_refunded={total_refunded} unreleased={unreleased}"
+                );
+            }
+        }
+    }
+}
