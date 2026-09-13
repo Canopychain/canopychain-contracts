@@ -822,3 +822,153 @@ fn invariants_hold_across_a_grid_of_deposits_and_schedules() {
         }
     }
 }
+
+#[test]
+fn refund_invariants_hold_across_a_grid_of_donors_and_partial_releases() {
+    // The property that matters for refunds isn't any single donor's split
+    // — it's that no matter how many donors there are, how they split the
+    // pool, or how far the schedule got before cancellation, the total they
+    // can claim back together never exceeds what cancellation actually left
+    // in the vault.
+    let donor_splits: [&[i128]; 4] = [
+        &[700, 300],
+        &[1, 1, 1],
+        &[999, 1],
+        &[3_333, 3_333, 3_334],
+    ];
+    let schedules: [&[u32]; 3] = [&[10_000], &[5_000, 5_000], &[3_333, 3_333, 3_334]];
+
+    for &splits in &donor_splits {
+        for &payouts in &schedules {
+            for milestones_before_cancel in 0..=payouts.len() {
+                let s = setup();
+
+                let mut donors: Vec<Address> = Vec::new(&s.env);
+                for &amount in splits {
+                    let donor = Address::generate(&s.env);
+                    s.token_admin.mint(&donor, &amount);
+                    s.client.deposit(
+                        &donor,
+                        &0u64,
+                        &s.recipient,
+                        &s.attestor,
+                        &s.token.address,
+                        &amount,
+                    );
+                    donors.push_back(donor);
+                }
+
+                let mut milestones: Vec<Milestone> = Vec::new(&s.env);
+                for (i, &payout_bps) in payouts.iter().enumerate() {
+                    milestones.push_back(Milestone {
+                        threshold_bps: (i as u32 + 1) * 100,
+                        payout_bps,
+                    });
+                }
+                s.client.configure_milestones(&0u64, &milestones);
+
+                for _ in 0..milestones_before_cancel {
+                    s.client.attest_milestone(&0u64);
+                }
+                s.client.cancel_project(&0u64);
+
+                let vault = s.client.get_vault(&0u64);
+                let unreleased = vault.total_deposited - vault.total_released;
+
+                let mut total_refunded: i128 = 0;
+                for donor in donors.iter() {
+                    let refunded = s.client.refund(&0u64, &donor);
+                    assert!(
+                        refunded >= 0,
+                        "negative refund: splits={splits:?} payouts={payouts:?}"
+                    );
+                    total_refunded += refunded;
+                }
+
+                assert!(
+                    total_refunded <= unreleased,
+                    "refunds exceeded unreleased balance: splits={splits:?} payouts={payouts:?} \
+                     milestones_before_cancel={milestones_before_cancel} \
+                     total_refunded={total_refunded} unreleased={unreleased}"
+                );
+
+                // Per-donor rounding can leave a little dust unclaimed, but
+                // never more than a unit per donor.
+                let max_dust = donors.len() as i128;
+                assert!(
+                    unreleased - total_refunded <= max_dust,
+                    "too much dust left unclaimed: splits={splits:?} payouts={payouts:?} \
+                     milestones_before_cancel={milestones_before_cancel} \
+                     total_refunded={total_refunded} unreleased={unreleased}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn schedule_summing_under_100_percent_leaves_remainder_stuck_in_vault() {
+    // validate_schedule accepts a schedule whose payouts total less than
+    // 100% — it's a legal configuration for a project that, say, only
+    // commits to paying out for the milestones it's confident it'll hit.
+    // Running it to completion shouldn't pay the recipient the full pool;
+    // whatever fraction the schedule never promised stays behind in the
+    // vault, with no further schedule step able to release it.
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &1_000,
+    );
+
+    // Totals 8,000 bps (80%) — 20% is deliberately left unscheduled.
+    let schedule = Vec::from_array(
+        &s.env,
+        [
+            Milestone {
+                threshold_bps: 500,
+                payout_bps: 2_000,
+            },
+            Milestone {
+                threshold_bps: 1_000,
+                payout_bps: 3_000,
+            },
+            Milestone {
+                threshold_bps: 1_500,
+                payout_bps: 3_000,
+            },
+        ],
+    );
+    s.client.configure_milestones(&0u64, &schedule);
+
+    s.client.attest_milestone(&0u64);
+    s.client.attest_milestone(&0u64);
+    s.client.attest_milestone(&0u64);
+
+    // 80% of the 1,000 deposited reached the recipient...
+    assert_eq!(s.token.balance(&s.recipient), 800);
+
+    let vault = s.client.get_vault(&0u64);
+    assert_eq!(vault.milestones_completed, 3);
+    assert_eq!(vault.total_deposited, 1_000);
+    assert_eq!(vault.total_released, 800);
+
+    // ...and the schedule is exhausted, so nothing can release the rest.
+    let result = s.client.try_attest_milestone(&0u64);
+    assert_eq!(result, Err(Ok(Error::AllMilestonesComplete)));
+
+    // The other 20% just sits in the contract's balance, unreachable
+    // through the normal milestone path.
+    assert_eq!(s.token.balance(&s.client.address), 200);
+
+    // The only way out for that remainder is cancellation, at which point
+    // it becomes the unreleased balance donors can refund.
+    s.client.cancel_project(&0u64);
+    let refunded = s.client.refund(&0u64, &s.donor);
+    assert_eq!(refunded, 200);
+    assert_eq!(s.token.balance(&s.client.address), 0);
+}
