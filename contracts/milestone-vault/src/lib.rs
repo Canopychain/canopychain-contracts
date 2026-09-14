@@ -202,6 +202,29 @@ impl MilestoneVault {
             .ok_or(Error::NotInitialized)
     }
 
+    /// Rotates the admin address. Gated by the current admin, since the
+    /// admin key is the system's only circuit breaker — it's what gates
+    /// `pause`, `configure_milestones`, `set_attestor`, and
+    /// `cancel_project` — losing it without a way to rotate it would mean
+    /// losing the ability to halt a stalled project or replace a
+    /// compromised attestor.
+    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        extend_instance_ttl(&env);
+
+        env.events()
+            .publish((symbol_short!("admin"),), new_admin);
+
+        Ok(())
+    }
+
     /// Reads back a project's pooled-donation vault by id.
     pub fn get_vault(env: Env, project_id: u64) -> Result<ProjectVault, Error> {
         env.storage()
