@@ -55,6 +55,9 @@ pub enum DataKey {
     Schedule(u64),
     /// Whether the contract is paused. Instance storage.
     Paused,
+    /// The minimum accepted deposit amount, in the deposited token's
+    /// smallest unit. Instance storage.
+    MinDeposit,
 }
 
 #[contracterror]
@@ -74,6 +77,7 @@ pub enum Error {
     ContractPaused = 11,
     NotCancelled = 12,
     NothingToRefund = 13,
+    DepositBelowMinimum = 14,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -236,6 +240,15 @@ impl MilestoneVault {
             return Err(Error::InvalidAmount);
         }
 
+        let min_deposit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDeposit)
+            .unwrap_or(0);
+        if amount < min_deposit {
+            return Err(Error::DepositBelowMinimum);
+        }
+
         let key = DataKey::Vault(project_id);
         let mut vault: ProjectVault = match env.storage().persistent().get(&key) {
             Some(vault) => vault,
@@ -387,6 +400,45 @@ impl MilestoneVault {
         );
 
         Ok(payout)
+    }
+
+    /// Reads back the minimum accepted deposit amount. Defaults to 0 (no
+    /// floor) until an admin sets one with `set_min_deposit`.
+    pub fn min_deposit(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinDeposit)
+            .unwrap_or(0)
+    }
+
+    /// Sets the minimum amount `deposit` will accept. Admin-gated, so
+    /// whoever runs a given instance can pick a floor that fits the token
+    /// and project sizes it actually handles, rather than the contract
+    /// hard-coding one that fits none of them. A dust-sized contribution
+    /// below the floor would round to nothing in every tranche calculation
+    /// it takes part in while still paying storage rent on its donation
+    /// record, which this exists to avoid.
+    pub fn set_min_deposit(env: Env, min_deposit: i128) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if min_deposit < 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDeposit, &min_deposit);
+        extend_instance_ttl(&env);
+
+        env.events()
+            .publish((symbol_short!("mindep"),), min_deposit);
+
+        Ok(())
     }
 
     /// Halts deposits and milestone attestations. Admin-gated emergency
