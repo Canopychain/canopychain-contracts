@@ -364,6 +364,29 @@ impl MilestoneVault {
             .ok_or(Error::ScheduleNotFound)
     }
 
+    /// Reads back the next milestone a project is waiting on — the entry
+    /// in its schedule at index `milestones_completed` — or
+    /// `Error::AllMilestonesComplete` once every tranche has been attested.
+    /// Collapses the get_vault + get_schedule + index pattern a caller
+    /// otherwise has to repeat on every poll into a single read.
+    pub fn next_milestone(env: Env, project_id: u64) -> Result<Milestone, Error> {
+        let vault: ProjectVault = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vault(project_id))
+            .ok_or(Error::VaultNotFound)?;
+
+        let schedule: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Schedule(project_id))
+            .ok_or(Error::ScheduleNotFound)?;
+
+        schedule
+            .get(vault.milestones_completed)
+            .ok_or(Error::AllMilestonesComplete)
+    }
+
     /// Confirms that the next milestone in a project's schedule has been
     /// reached. Attestor-gated — the attestor recorded against the vault
     /// (set on the project's first deposit) is the only address that can
