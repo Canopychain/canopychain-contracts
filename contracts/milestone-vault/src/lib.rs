@@ -55,6 +55,9 @@ pub enum DataKey {
     Schedule(u64),
     /// Whether the contract is paused. Instance storage.
     Paused,
+    /// The minimum accepted deposit amount, in the deposited token's
+    /// smallest unit. Instance storage.
+    MinDeposit,
 }
 
 #[contracterror]
@@ -74,6 +77,7 @@ pub enum Error {
     ContractPaused = 11,
     NotCancelled = 12,
     NothingToRefund = 13,
+    DepositBelowMinimum = 14,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -198,6 +202,29 @@ impl MilestoneVault {
             .ok_or(Error::NotInitialized)
     }
 
+    /// Rotates the admin address. Gated by the current admin, since the
+    /// admin key is the system's only circuit breaker — it's what gates
+    /// `pause`, `configure_milestones`, `set_attestor`, and
+    /// `cancel_project` — losing it without a way to rotate it would mean
+    /// losing the ability to halt a stalled project or replace a
+    /// compromised attestor.
+    pub fn transfer_admin(env: Env, new_admin: Address) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        extend_instance_ttl(&env);
+
+        env.events()
+            .publish((symbol_short!("admin"),), new_admin);
+
+        Ok(())
+    }
+
     /// Reads back a project's pooled-donation vault by id.
     pub fn get_vault(env: Env, project_id: u64) -> Result<ProjectVault, Error> {
         env.storage()
@@ -234,6 +261,15 @@ impl MilestoneVault {
 
         if amount <= 0 {
             return Err(Error::InvalidAmount);
+        }
+
+        let min_deposit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDeposit)
+            .unwrap_or(0);
+        if amount < min_deposit {
+            return Err(Error::DepositBelowMinimum);
         }
 
         let key = DataKey::Vault(project_id);
@@ -281,9 +317,12 @@ impl MilestoneVault {
         Ok(vault.total_deposited)
     }
 
-    /// Sets a project's tranche-release schedule. Admin-only, and callable
-    /// only once per project — the schedule donors funded against can't be
-    /// quietly changed underneath them after the fact.
+    /// Sets a project's tranche-release schedule. Admin-only. Freely
+    /// reconfigurable — including overwriting a prior schedule outright —
+    /// up until the project's first deposit lands; there's no donor to
+    /// protect from a changing schedule before then, so a typo'd schedule
+    /// isn't permanent. Once a donor has funded the project, the schedule
+    /// locks and further calls fail.
     pub fn configure_milestones(
         env: Env,
         project_id: u64,
@@ -297,7 +336,11 @@ impl MilestoneVault {
         admin.require_auth();
 
         let key = DataKey::Schedule(project_id);
-        if env.storage().persistent().has(&key) {
+        let has_deposits = env
+            .storage()
+            .persistent()
+            .has(&DataKey::Vault(project_id));
+        if env.storage().persistent().has(&key) && has_deposits {
             return Err(Error::ScheduleAlreadySet);
         }
 
@@ -319,6 +362,29 @@ impl MilestoneVault {
             .persistent()
             .get(&DataKey::Schedule(project_id))
             .ok_or(Error::ScheduleNotFound)
+    }
+
+    /// Reads back the next milestone a project is waiting on — the entry
+    /// in its schedule at index `milestones_completed` — or
+    /// `Error::AllMilestonesComplete` once every tranche has been attested.
+    /// Collapses the get_vault + get_schedule + index pattern a caller
+    /// otherwise has to repeat on every poll into a single read.
+    pub fn next_milestone(env: Env, project_id: u64) -> Result<Milestone, Error> {
+        let vault: ProjectVault = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Vault(project_id))
+            .ok_or(Error::VaultNotFound)?;
+
+        let schedule: Vec<Milestone> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Schedule(project_id))
+            .ok_or(Error::ScheduleNotFound)?;
+
+        schedule
+            .get(vault.milestones_completed)
+            .ok_or(Error::AllMilestonesComplete)
     }
 
     /// Confirms that the next milestone in a project's schedule has been
@@ -380,6 +446,45 @@ impl MilestoneVault {
         );
 
         Ok(payout)
+    }
+
+    /// Reads back the minimum accepted deposit amount. Defaults to 0 (no
+    /// floor) until an admin sets one with `set_min_deposit`.
+    pub fn min_deposit(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinDeposit)
+            .unwrap_or(0)
+    }
+
+    /// Sets the minimum amount `deposit` will accept. Admin-gated, so
+    /// whoever runs a given instance can pick a floor that fits the token
+    /// and project sizes it actually handles, rather than the contract
+    /// hard-coding one that fits none of them. A dust-sized contribution
+    /// below the floor would round to nothing in every tranche calculation
+    /// it takes part in while still paying storage rent on its donation
+    /// record, which this exists to avoid.
+    pub fn set_min_deposit(env: Env, min_deposit: i128) -> Result<(), Error> {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(Error::NotInitialized)?;
+        admin.require_auth();
+
+        if min_deposit < 0 {
+            return Err(Error::InvalidAmount);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::MinDeposit, &min_deposit);
+        extend_instance_ttl(&env);
+
+        env.events()
+            .publish((symbol_short!("mindep"),), min_deposit);
+
+        Ok(())
     }
 
     /// Halts deposits and milestone attestations. Admin-gated emergency
