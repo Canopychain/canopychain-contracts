@@ -281,9 +281,12 @@ impl MilestoneVault {
         Ok(vault.total_deposited)
     }
 
-    /// Sets a project's tranche-release schedule. Admin-only, and callable
-    /// only once per project — the schedule donors funded against can't be
-    /// quietly changed underneath them after the fact.
+    /// Sets a project's tranche-release schedule. Admin-only. Freely
+    /// reconfigurable — including overwriting a prior schedule outright —
+    /// up until the project's first deposit lands; there's no donor to
+    /// protect from a changing schedule before then, so a typo'd schedule
+    /// isn't permanent. Once a donor has funded the project, the schedule
+    /// locks and further calls fail.
     pub fn configure_milestones(
         env: Env,
         project_id: u64,
@@ -297,7 +300,11 @@ impl MilestoneVault {
         admin.require_auth();
 
         let key = DataKey::Schedule(project_id);
-        if env.storage().persistent().has(&key) {
+        let has_deposits = env
+            .storage()
+            .persistent()
+            .has(&DataKey::Vault(project_id));
+        if env.storage().persistent().has(&key) && has_deposits {
             return Err(Error::ScheduleAlreadySet);
         }
 
