@@ -11,8 +11,13 @@ pub fn tranche_payout(total_deposited: i128, payout_bps: u32) -> i128 {
         return 0;
     }
 
-    let scaled = total_deposited.saturating_mul(payout_bps as i128);
-    let payout = scaled / BPS_DENOMINATOR;
+    // Split the multiply around the division so a large deposit doesn't
+    // saturate and silently lose the fraction: t*b/d == (t/d)*b + (t%d)*b/d,
+    // exactly, and the left term is the only one that can overflow.
+    let bps = payout_bps as i128;
+    let whole = (total_deposited / BPS_DENOMINATOR).saturating_mul(bps);
+    let rest = (total_deposited % BPS_DENOMINATOR) * bps / BPS_DENOMINATOR;
+    let payout = whole.saturating_add(rest);
     payout.min(total_deposited)
 }
 
@@ -75,12 +80,12 @@ mod test {
     }
 
     #[test]
-    fn saturates_instead_of_overflowing() {
+    fn tranche_payout_saturates_instead_of_overflowing() {
         assert_eq!(tranche_payout(i128::MAX, 10_000), i128::MAX);
 
         let payout = tranche_payout(i128::MAX, 5_000);
         assert!(payout > 0);
-        assert!(payout <= i128::MAX);
+        assert!(payout <= i128::MAX / 2 + 1);
     }
 
     #[test]
@@ -94,7 +99,10 @@ mod test {
                 let payout = tranche_payout(deposited, bps);
 
                 // Never negative, never more than what was deposited.
-                assert!(payout >= 0, "negative payout: deposited={deposited} bps={bps}");
+                assert!(
+                    payout >= 0,
+                    "negative payout: deposited={deposited} bps={bps}"
+                );
                 assert!(
                     payout <= deposited.max(0),
                     "payout exceeds deposited: deposited={deposited} bps={bps}"
@@ -142,7 +150,7 @@ mod test {
     }
 
     #[test]
-    fn saturates_instead_of_overflowing() {
+    fn proportional_share_saturates_instead_of_overflowing() {
         let share = proportional_share(i128::MAX, i128::MAX, 1);
         assert_eq!(share, i128::MAX);
     }
