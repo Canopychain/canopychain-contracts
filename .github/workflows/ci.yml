@@ -19,7 +19,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: wasm32-unknown-unknown
+          targets: wasm32v1-none
           components: rustfmt, clippy
 
       - name: Cache cargo
@@ -31,8 +31,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Build (wasm32 target)
-        run: cargo build --workspace --target wasm32-unknown-unknown --release
+      - name: Build (wasm32v1-none target)
+        run: cargo build --workspace --target wasm32v1-none --release
 
       - name: Test
         run: cargo test --workspace
