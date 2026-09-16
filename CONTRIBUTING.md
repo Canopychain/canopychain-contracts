@@ -7,11 +7,11 @@ conventions across the Canopychain project), see
 
 ## Toolchain
 
-- Rust (stable), with the `wasm32-unknown-unknown` target and the
+- Rust (stable), with the `wasm32v1-none` target and the
   `rustfmt` and `clippy` components:
 
   ```sh
-  rustup target add wasm32-unknown-unknown
+  rustup target add wasm32v1-none
   rustup component add rustfmt clippy
   ```
 
@@ -21,7 +21,7 @@ conventions across the Canopychain project), see
 ## Building
 
 ```sh
-cargo build --workspace --target wasm32-unknown-unknown --release
+cargo build --workspace --target wasm32v1-none --release
 ```
 
 ## Checks to run before opening a PR
@@ -33,7 +33,7 @@ would catch:
 ```sh
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo build --workspace --target wasm32-unknown-unknown --release
+cargo build --workspace --target wasm32v1-none --release
 cargo test --workspace
 ```
 
