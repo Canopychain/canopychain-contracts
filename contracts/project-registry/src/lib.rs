@@ -1,8 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contracttype, contractimpl, symbol_short, Address, BytesN, Env,
-    String,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String,
 };
 
 /// A reforestation project registered with the platform.
@@ -14,7 +13,7 @@ use soroban_sdk::{
 /// submit milestone confirmations for this project on the milestone-vault
 /// contract.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Project {
     pub operator: Address,
     pub recipient: Address,
@@ -77,6 +76,12 @@ fn extend_project_ttl(env: &Env, project_id: u64) {
 #[contract]
 pub struct ProjectRegistry;
 
+// Events still go out through env.events().publish rather than the
+// #[contractevent] macro the SDK now prefers: the tuple-topic layout is a
+// published interface (EVENTS.md) that the backend indexer decodes
+// positionally, so switching encodings is a coordinated change across both
+// repos, not a local one.
+#[allow(deprecated)]
 #[contractimpl]
 impl ProjectRegistry {
     /// Sets the registry admin and seeds the project-id counter. Can only

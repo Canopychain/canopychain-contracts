@@ -57,7 +57,7 @@ fn register_project_stores_unapproved_entry() {
     assert_eq!(project.recipient, recipient);
     assert_eq!(project.attestor, attestor);
     assert_eq!(project.name, name);
-    assert_eq!(project.approved, false);
+    assert!(!project.approved);
 }
 
 #[test]

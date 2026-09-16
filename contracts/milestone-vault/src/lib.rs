@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contracttype, contractimpl, symbol_short, token, Address, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, token, Address, Env, Vec,
 };
 
 mod math;
@@ -13,7 +13,7 @@ mod math;
 /// fraction of `total_deposited` releases to `recipient` each time the
 /// `attestor` confirms a milestone, per the project's milestone schedule.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProjectVault {
     pub recipient: Address,
     pub attestor: Address,
@@ -34,7 +34,7 @@ pub struct ProjectVault {
 /// `total_deposited` released to the recipient when this milestone is
 /// attested.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Milestone {
     pub threshold_bps: u32,
     pub payout_bps: u32,
@@ -182,6 +182,12 @@ fn validate_schedule(milestones: &Vec<Milestone>) -> Result<(), Error> {
 #[contract]
 pub struct MilestoneVault;
 
+// Events still go out through env.events().publish rather than the
+// #[contractevent] macro the SDK now prefers: the tuple-topic layout is a
+// published interface (EVENTS.md) that the backend indexer decodes
+// positionally, so switching encodings is a coordinated change across both
+// repos, not a local one.
+#[allow(deprecated)]
 #[contractimpl]
 impl MilestoneVault {
     /// Sets the vault admin. Can only be called once.
@@ -219,8 +225,7 @@ impl MilestoneVault {
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         extend_instance_ttl(&env);
 
-        env.events()
-            .publish((symbol_short!("admin"),), new_admin);
+        env.events().publish((symbol_short!("admin"),), new_admin);
 
         Ok(())
     }
@@ -294,7 +299,7 @@ impl MilestoneVault {
         }
 
         let token_client = token::Client::new(&env, &token);
-        token_client.transfer(&donor, &env.current_contract_address(), &amount);
+        token_client.transfer(&donor, env.current_contract_address(), &amount);
 
         vault.total_deposited += amount;
         env.storage().persistent().set(&key, &vault);
@@ -336,10 +341,7 @@ impl MilestoneVault {
         admin.require_auth();
 
         let key = DataKey::Schedule(project_id);
-        let has_deposits = env
-            .storage()
-            .persistent()
-            .has(&DataKey::Vault(project_id));
+        let has_deposits = env.storage().persistent().has(&DataKey::Vault(project_id));
         if env.storage().persistent().has(&key) && has_deposits {
             return Err(Error::ScheduleAlreadySet);
         }
@@ -614,8 +616,7 @@ impl MilestoneVault {
         }
 
         let remaining = vault.total_deposited - vault.total_released;
-        let refund_amount =
-            math::proportional_share(donation, remaining, vault.total_deposited);
+        let refund_amount = math::proportional_share(donation, remaining, vault.total_deposited);
 
         env.storage().persistent().set(&donation_key, &0i128);
         extend_instance_ttl(&env);
@@ -626,10 +627,8 @@ impl MilestoneVault {
             token_client.transfer(&env.current_contract_address(), &donor, &refund_amount);
         }
 
-        env.events().publish(
-            (symbol_short!("refund"), project_id, donor),
-            refund_amount,
-        );
+        env.events()
+            .publish((symbol_short!("refund"), project_id, donor), refund_amount);
 
         Ok(refund_amount)
     }

@@ -93,7 +93,7 @@ fn first_deposit_opens_vault() {
     assert_eq!(vault.total_deposited, 600);
     assert_eq!(vault.total_released, 0);
     assert_eq!(vault.milestones_completed, 0);
-    assert_eq!(vault.cancelled, false);
+    assert!(!vault.cancelled);
 
     assert_eq!(s.token.balance(&s.donor), 400);
     assert_eq!(s.token.balance(&s.client.address), 600);
@@ -241,11 +241,24 @@ fn configure_milestones_stores_schedule() {
 }
 
 #[test]
-fn configure_milestones_twice_fails() {
+fn configure_milestones_locks_at_first_deposit() {
     let s = setup();
     let schedule = three_tranche_schedule(&s.env);
 
+    // Reconfiguring is fine while there's no donor to protect.
     s.client.configure_milestones(&0u64, &schedule);
+    s.client.configure_milestones(&0u64, &schedule);
+
+    s.token_admin.mint(&s.donor, &1_000);
+    s.client.deposit(
+        &s.donor,
+        &0u64,
+        &s.recipient,
+        &s.attestor,
+        &s.token.address,
+        &500,
+    );
+
     let result = s.client.try_configure_milestones(&0u64, &schedule);
     assert_eq!(result, Err(Ok(Error::ScheduleAlreadySet)));
 }
@@ -637,7 +650,7 @@ fn refund_returns_full_amount_when_nothing_released() {
 
     let refunded = s.client.refund(&0u64, &s.donor);
     assert_eq!(refunded, 500);
-    assert_eq!(s.token.balance(&s.donor), 500); // 1,000 minted - 500 deposited + 500 refunded
+    assert_eq!(s.token.balance(&s.donor), 1_000); // 1,000 minted - 500 deposited + 500 refunded
 
     // A second claim has nothing left to pay out.
     let result = s.client.try_refund(&0u64, &s.donor);
@@ -830,12 +843,7 @@ fn refund_invariants_hold_across_a_grid_of_donors_and_partial_releases() {
     // pool, or how far the schedule got before cancellation, the total they
     // can claim back together never exceeds what cancellation actually left
     // in the vault.
-    let donor_splits: [&[i128]; 4] = [
-        &[700, 300],
-        &[1, 1, 1],
-        &[999, 1],
-        &[3_333, 3_333, 3_334],
-    ];
+    let donor_splits: [&[i128]; 4] = [&[700, 300], &[1, 1, 1], &[999, 1], &[3_333, 3_333, 3_334]];
     let schedules: [&[u32]; 3] = [&[10_000], &[5_000, 5_000], &[3_333, 3_333, 3_334]];
 
     for &splits in &donor_splits {
