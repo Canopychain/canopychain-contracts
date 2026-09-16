@@ -33,7 +33,7 @@ are the raw codes a failed transaction reports back to a caller.
 | 4 | `InvalidAmount` | A deposit amount was zero or negative. |
 | 5 | `TokenMismatch` | A deposit's token doesn't match the token the vault was opened with. |
 | 6 | `VaultCancelled` | The project's vault has been cancelled. |
-| 7 | `ScheduleAlreadySet` | `configure_milestones` was called on a project that already has a schedule. |
+| 7 | `ScheduleAlreadySet` | `configure_milestones` was called on a project that already has a schedule and at least one deposit. |
 | 8 | `InvalidSchedule` | A milestone schedule was empty, had non-increasing thresholds, or payouts summing to more than 100%. |
 | 9 | `ScheduleNotFound` | No milestone schedule has been configured for the given project id. |
 | 10 | `AllMilestonesComplete` | `attest_milestone` was called after every milestone in the schedule was already attested. |
