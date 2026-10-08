@@ -207,20 +207,27 @@ fn deposits_from_different_donors_pool_together() {
     assert_eq!(s.client.get_donation(&0u64, &donor_two), 500);
 }
 
+const DAY: u64 = 24 * 60 * 60;
+
+/// A conventional schedule: hold 99% of the baseline forest, proven over
+/// three progressively longer windows.
 fn three_tranche_schedule(env: &Env) -> Vec<Milestone> {
     Vec::from_array(
         env,
         [
             Milestone {
-                threshold_bps: 500,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 90 * DAY,
                 payout_bps: 3_000,
             },
             Milestone {
-                threshold_bps: 1_000,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 180 * DAY,
                 payout_bps: 3_000,
             },
             Milestone {
-                threshold_bps: 2_000,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 365 * DAY,
                 payout_bps: 4_000,
             },
         ],
@@ -237,7 +244,8 @@ fn configure_milestones_stores_schedule() {
     let stored = s.client.get_schedule(&0u64);
     assert_eq!(stored.len(), 3);
     assert_eq!(stored.get(0).unwrap().payout_bps, 3_000);
-    assert_eq!(stored.get(2).unwrap().threshold_bps, 2_000);
+    assert_eq!(stored.get(0).unwrap().retention_floor_bps, 9_900);
+    assert_eq!(stored.get(2).unwrap().sustain_seconds, 365 * DAY);
 }
 
 #[test]
@@ -285,11 +293,13 @@ fn configure_milestones_rejects_payouts_over_100_percent() {
         &s.env,
         [
             Milestone {
-                threshold_bps: 500,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 90 * DAY,
                 payout_bps: 6_000,
             },
             Milestone {
-                threshold_bps: 1_000,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 180 * DAY,
                 payout_bps: 5_000,
             },
         ],
@@ -299,23 +309,89 @@ fn configure_milestones_rejects_payouts_over_100_percent() {
 }
 
 #[test]
-fn configure_milestones_rejects_non_increasing_thresholds() {
+fn configure_milestones_rejects_non_increasing_sustain_periods() {
     let s = setup();
     let schedule = Vec::from_array(
         &s.env,
         [
             Milestone {
-                threshold_bps: 1_000,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 90 * DAY,
                 payout_bps: 3_000,
             },
             Milestone {
-                threshold_bps: 1_000,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 90 * DAY,
                 payout_bps: 3_000,
             },
         ],
     );
     let result = s.client.try_configure_milestones(&0u64, &schedule);
     assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}
+
+#[test]
+fn configure_milestones_rejects_a_zero_retention_floor() {
+    let s = setup();
+    // A floor of zero is satisfied by a completely cleared plot, so this
+    // schedule would pay out for no demonstrated outcome at all.
+    let schedule = Vec::from_array(
+        &s.env,
+        [Milestone {
+            retention_floor_bps: 0,
+            sustain_seconds: 90 * DAY,
+            payout_bps: 3_000,
+        }],
+    );
+    let result = s.client.try_configure_milestones(&0u64, &schedule);
+    assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}
+
+#[test]
+fn configure_milestones_rejects_a_retention_floor_over_100_percent() {
+    let s = setup();
+    let schedule = Vec::from_array(
+        &s.env,
+        [Milestone {
+            retention_floor_bps: 10_001,
+            sustain_seconds: 90 * DAY,
+            payout_bps: 3_000,
+        }],
+    );
+    let result = s.client.try_configure_milestones(&0u64, &schedule);
+    assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}
+
+#[test]
+fn configure_milestones_rejects_a_zero_sustain_period() {
+    let s = setup();
+    // Satisfied the instant the project is funded — no track record at all.
+    let schedule = Vec::from_array(
+        &s.env,
+        [Milestone {
+            retention_floor_bps: 9_900,
+            sustain_seconds: 0,
+            payout_bps: 3_000,
+        }],
+    );
+    let result = s.client.try_configure_milestones(&0u64, &schedule);
+    assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}
+
+#[test]
+fn configure_milestones_accepts_a_full_retention_floor() {
+    let s = setup();
+    // 100% retention — no loss whatsoever — is a legitimate, strict floor.
+    let schedule = Vec::from_array(
+        &s.env,
+        [Milestone {
+            retention_floor_bps: 10_000,
+            sustain_seconds: 90 * DAY,
+            payout_bps: 10_000,
+        }],
+    );
+    s.client.configure_milestones(&0u64, &schedule);
+    assert_eq!(s.client.get_schedule(&0u64).len(), 1);
 }
 
 #[test]
@@ -720,11 +796,13 @@ fn attest_milestone_with_zero_payout_bps_transfers_nothing() {
         &s.env,
         [
             Milestone {
-                threshold_bps: 500,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 90 * DAY,
                 payout_bps: 0,
             },
             Milestone {
-                threshold_bps: 1_000,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 180 * DAY,
                 payout_bps: 10_000,
             },
         ],
@@ -759,7 +837,8 @@ fn refund_after_full_release_pays_nothing_but_does_not_error() {
     let full_payout = Vec::from_array(
         &s.env,
         [Milestone {
-            threshold_bps: 500,
+            retention_floor_bps: 9_900,
+            sustain_seconds: 90 * DAY,
             payout_bps: 10_000,
         }],
     );
@@ -803,7 +882,8 @@ fn invariants_hold_across_a_grid_of_deposits_and_schedules() {
             let mut milestones: Vec<Milestone> = Vec::new(&s.env);
             for (i, &payout_bps) in payouts.iter().enumerate() {
                 milestones.push_back(Milestone {
-                    threshold_bps: (i as u32 + 1) * 100,
+                    retention_floor_bps: 9_900,
+                    sustain_seconds: (i as u64 + 1) * 30 * DAY,
                     payout_bps,
                 });
             }
@@ -869,7 +949,8 @@ fn refund_invariants_hold_across_a_grid_of_donors_and_partial_releases() {
                 let mut milestones: Vec<Milestone> = Vec::new(&s.env);
                 for (i, &payout_bps) in payouts.iter().enumerate() {
                     milestones.push_back(Milestone {
-                        threshold_bps: (i as u32 + 1) * 100,
+                        retention_floor_bps: 9_900,
+                        sustain_seconds: (i as u64 + 1) * 30 * DAY,
                         payout_bps,
                     });
                 }
@@ -938,15 +1019,18 @@ fn schedule_summing_under_100_percent_leaves_remainder_stuck_in_vault() {
         &s.env,
         [
             Milestone {
-                threshold_bps: 500,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 90 * DAY,
                 payout_bps: 2_000,
             },
             Milestone {
-                threshold_bps: 1_000,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 180 * DAY,
                 payout_bps: 3_000,
             },
             Milestone {
-                threshold_bps: 1_500,
+                retention_floor_bps: 9_900,
+                sustain_seconds: 365 * DAY,
                 payout_bps: 3_000,
             },
         ],

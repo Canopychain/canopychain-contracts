@@ -26,17 +26,28 @@ pub struct ProjectVault {
 
 /// One tranche of a project's release schedule.
 ///
-/// `threshold_bps` is the cumulative forest-cover-change (in basis points
-/// of plot area) the backend's satellite check must confirm before the
-/// attestor will attest this milestone; it's recorded on-chain purely for
-/// donor-facing transparency and isn't checked by the contract itself,
-/// which has no way to verify satellite data. `payout_bps` is the share of
-/// `total_deposited` released to the recipient when this milestone is
-/// attested.
+/// A milestone certifies *retention*, not growth. `retention_floor_bps` is
+/// the share of the plot's baseline forest area that must still be
+/// standing, and `sustain_seconds` is how long it must have continuously
+/// held at or above that floor before this tranche unlocks. So a milestone
+/// reads as "99% of the baseline forest still standing, sustained for 90
+/// days".
+///
+/// That framing is deliberate: the satellite data this platform can
+/// actually query records tree-cover *loss*, not regrowth, so "this plot
+/// has verifiably not been cleared" is a claim the data supports and
+/// "this plot has grown back" is not. See the attestation-model docs.
+///
+/// Both values are recorded on-chain purely for donor-facing transparency.
+/// The contract has no way to verify satellite data and does not check
+/// either of them itself — only that the project's attestor signed.
+/// `payout_bps` is the share of `total_deposited` released to the
+/// recipient when this milestone is attested.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Milestone {
-    pub threshold_bps: u32,
+    pub retention_floor_bps: u32,
+    pub sustain_seconds: u64,
     pub payout_bps: u32,
 }
 
@@ -147,24 +158,39 @@ fn require_not_paused(env: &Env) -> Result<(), Error> {
 /// Basis-points denominator (10_000 bps = 100%).
 const BPS_DENOMINATOR: u32 = 10_000;
 
-/// Rejects an empty schedule, a schedule whose payouts sum to more than
-/// 100%, or one whose thresholds don't strictly increase (a project should
-/// need more forest-cover change to unlock each later tranche, never less
-/// or the same).
+/// Rejects an empty schedule, one whose payouts sum to more than 100%, one
+/// with a retention floor outside 1..=100%, or one whose sustain periods
+/// don't strictly increase — each tranche should require a longer proven
+/// track record than the one before it, never a shorter or equal one.
+///
+/// A zero retention floor and a zero sustain period are both rejected
+/// deliberately. Either one produces a milestone that certifies nothing:
+/// a floor of zero is satisfied by a completely cleared plot, and a
+/// sustain period of zero is satisfied the instant a project is funded.
+/// Both would release donor money for no demonstrated outcome, which is
+/// exactly what this schedule exists to prevent.
 fn validate_schedule(milestones: &Vec<Milestone>) -> Result<(), Error> {
     if milestones.is_empty() {
         return Err(Error::InvalidSchedule);
     }
 
     let mut payout_total: u32 = 0;
-    let mut prev_threshold: Option<u32> = None;
+    let mut prev_sustain: Option<u64> = None;
     for milestone in milestones.iter() {
-        if let Some(prev) = prev_threshold {
-            if milestone.threshold_bps <= prev {
+        if milestone.retention_floor_bps == 0 || milestone.retention_floor_bps > BPS_DENOMINATOR {
+            return Err(Error::InvalidSchedule);
+        }
+
+        if milestone.sustain_seconds == 0 {
+            return Err(Error::InvalidSchedule);
+        }
+
+        if let Some(prev) = prev_sustain {
+            if milestone.sustain_seconds <= prev {
                 return Err(Error::InvalidSchedule);
             }
         }
-        prev_threshold = Some(milestone.threshold_bps);
+        prev_sustain = Some(milestone.sustain_seconds);
 
         payout_total = match payout_total.checked_add(milestone.payout_bps) {
             Some(total) => total,
