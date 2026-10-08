@@ -378,8 +378,13 @@ impl MilestoneVault {
         extend_instance_ttl(&env);
         extend_schedule_ttl(&env, project_id);
 
+        // The whole schedule, not just its length: an indexer has to be
+        // able to reconstruct the resulting state from the event alone, the
+        // way every other event in this contract allows. Publishing only a
+        // count left the floors and sustain periods readable solely by a
+        // separate contract call.
         env.events()
-            .publish((symbol_short!("schedule"), project_id), milestones.len());
+            .publish((symbol_short!("schedule"), project_id), milestones);
 
         Ok(())
     }

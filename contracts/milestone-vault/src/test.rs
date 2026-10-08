@@ -1,8 +1,9 @@
 #![cfg(test)]
 
 use super::*;
-use soroban_sdk::testutils::Address as _;
+use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+use soroban_sdk::{vec, IntoVal};
 
 fn create_token<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, StellarAssetClient<'a>) {
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
@@ -306,6 +307,29 @@ fn configure_milestones_rejects_payouts_over_100_percent() {
     );
     let result = s.client.try_configure_milestones(&0u64, &schedule);
     assert_eq!(result, Err(Ok(Error::InvalidSchedule)));
+}
+
+#[test]
+fn configure_milestones_emits_the_whole_schedule() {
+    // The indexer reconstructs its milestone rows from this payload alone,
+    // so the event carrying the full schedule rather than a count is part
+    // of the contract's interface, not an implementation detail.
+    let s = setup();
+    let schedule = three_tranche_schedule(&s.env);
+
+    s.client.configure_milestones(&0u64, &schedule);
+
+    assert_eq!(
+        s.env.events().all(),
+        vec![
+            &s.env,
+            (
+                s.client.address.clone(),
+                (symbol_short!("schedule"), 0u64).into_val(&s.env),
+                schedule.into_val(&s.env),
+            ),
+        ]
+    );
 }
 
 #[test]
