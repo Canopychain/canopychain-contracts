@@ -29,7 +29,7 @@ Source: `contracts/milestone-vault/src/lib.rs`
 | Event | Topics | Data | Emitted when |
 |---|---|---|---|
 | `deposit` | `("deposit", project_id: u64, donor: Address)` | `(amount: i128, total_deposited: i128)` | A donor deposits into a project's vault via `deposit`. `total_deposited` is the vault's new running total, not just this deposit. |
-| `schedule` | `("schedule", project_id: u64)` | `milestone_count: u32` | An admin sets a project's tranche schedule via `configure_milestones`. |
+| `schedule` | `("schedule", project_id: u64)` | `Vec<Milestone>` — each `{ retention_floor_bps: u32, sustain_seconds: u64, payout_bps: u32 }` | An admin sets a project's tranche schedule via `configure_milestones`. The whole schedule, in order, so a consumer can reconstruct it from the event alone. |
 | `attested` | `("attested", project_id: u64, milestones_completed: u32)` | `payout: i128` | The attestor confirms a milestone via `attest_milestone`. `milestones_completed` is the count *after* this attestation (i.e. this milestone's 1-based index); `payout` may be `0` if the tranche's `payout_bps` is `0`. |
 | `pause` | `("pause",)` | `()` | An admin pauses the vault via `pause`. |
 | `unpause` | `("unpause",)` | `()` | An admin unpauses the vault via `unpause`. |
@@ -51,3 +51,10 @@ Source: `contracts/milestone-vault/src/lib.rs`
 - To reconstruct full vault/project state, pair these events with the
   corresponding `get_*` read calls rather than relying on event data
   alone (e.g. `attestor` doesn't carry the new attestor address).
+  `schedule` is the exception: it carries every field of every milestone,
+  so an indexer never needs `get_schedule` to mirror a project's
+  schedule.
+- `sustain_seconds` is a `u64`. A consumer decoding it into a
+  fixed-width integer should reject values it can't represent rather than
+  truncating them — a silently narrowed sustain period would make a
+  milestone look earlier than the chain says it is.

@@ -34,7 +34,7 @@ are the raw codes a failed transaction reports back to a caller.
 | 5 | `TokenMismatch` | A deposit's token doesn't match the token the vault was opened with. |
 | 6 | `VaultCancelled` | The project's vault has been cancelled. |
 | 7 | `ScheduleAlreadySet` | `configure_milestones` was called on a project that already has a schedule and at least one deposit. |
-| 8 | `InvalidSchedule` | A milestone schedule was empty, had non-increasing thresholds, or payouts summing to more than 100%. |
+| 8 | `InvalidSchedule` | A milestone schedule was empty, had a retention floor of zero or above 100%, had a sustain period of zero, had sustain periods that don't strictly increase, or payouts summing to more than 100%. |
 | 9 | `ScheduleNotFound` | No milestone schedule has been configured for the given project id. |
 | 10 | `AllMilestonesComplete` | `attest_milestone` was called after every milestone in the schedule was already attested. |
 | 11 | `ContractPaused` | An admin has paused the vault, blocking deposits and attestations. |
