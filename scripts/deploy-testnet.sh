@@ -52,7 +52,7 @@ cat > "$DEPLOYMENTS_FILE" <<EOF
 {
   "network": "$NETWORK",
   "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "admin": "$SOURCE_ACCOUNT",
+  "admin": "$(stellar keys address "$SOURCE_ACCOUNT")",
   "contracts": {
     "project-registry": "$PROJECT_REGISTRY_ID",
     "milestone-vault": "$MILESTONE_VAULT_ID"

@@ -20,8 +20,8 @@ Both contracts are live on Stellar testnet and back the running app at
 
 | Contract | Contract ID |
 | -------- | ----------- |
-| `project-registry` | [`CBJBOA3G7F4C4FCRRZJRUQX7C2FFNO7C5EXNXV4MHYJRXF2HCKILO62P`](https://stellar.expert/explorer/testnet/contract/CBJBOA3G7F4C4FCRRZJRUQX7C2FFNO7C5EXNXV4MHYJRXF2HCKILO62P) |
-| `milestone-vault` | [`CBZHVFQ7HHXWTI7PF52ILEFY4PNKFPO3XBXZNNHNHKKW6H253EXEVODF`](https://stellar.expert/explorer/testnet/contract/CBZHVFQ7HHXWTI7PF52ILEFY4PNKFPO3XBXZNNHNHKKW6H253EXEVODF) |
+| `project-registry` | [`CBNMPODFJ4MSDX7UAIZ5KLLAAEJVW4ZKFMPHT7PK6FBECVDGNX7EBOZG`](https://stellar.expert/explorer/testnet/contract/CBNMPODFJ4MSDX7UAIZ5KLLAAEJVW4ZKFMPHT7PK6FBECVDGNX7EBOZG) |
+| `milestone-vault` | [`CDTJS22YNZJCBP26PV5AYNRHSK6HEQV6SI6DCQ66C7L3J2Q3MDH5OGEH`](https://stellar.expert/explorer/testnet/contract/CDTJS22YNZJCBP26PV5AYNRHSK6HEQV6SI6DCQ66C7L3J2Q3MDH5OGEH) |
 
 The same IDs are recorded in [deployments.json](./deployments.json), which
 [`scripts/deploy-testnet.sh`](./scripts/deploy-testnet.sh) rewrites on each
