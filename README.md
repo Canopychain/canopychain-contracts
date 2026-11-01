@@ -10,6 +10,20 @@ real growth, attested on-chain by a trusted attestor service.
 - `project-registry` — on-chain reforestation project application and registry
 - `milestone-vault` — tranche-release donation vault (deposit / attest / release / refund)
 
+## Testnet deployment
+
+Both contracts are live on Stellar testnet and back the running app at
+<https://canopychain-frontend.vercel.app>.
+
+| Contract | Contract ID |
+| -------- | ----------- |
+| `project-registry` | [`CBJBOA3G7F4C4FCRRZJRUQX7C2FFNO7C5EXNXV4MHYJRXF2HCKILO62P`](https://stellar.expert/explorer/testnet/contract/CBJBOA3G7F4C4FCRRZJRUQX7C2FFNO7C5EXNXV4MHYJRXF2HCKILO62P) |
+| `milestone-vault` | [`CBZHVFQ7HHXWTI7PF52ILEFY4PNKFPO3XBXZNNHNHKKW6H253EXEVODF`](https://stellar.expert/explorer/testnet/contract/CBZHVFQ7HHXWTI7PF52ILEFY4PNKFPO3XBXZNNHNHKKW6H253EXEVODF) |
+
+The same IDs are recorded in [deployments.json](./deployments.json), which
+[`scripts/deploy-testnet.sh`](./scripts/deploy-testnet.sh) rewrites on each
+deploy.
+
 ## Error codes
 
 Each contract's entry points return a numbered error code on failure. These
@@ -66,7 +80,8 @@ STELLAR_SOURCE_ACCOUNT=my-testnet-identity ./scripts/deploy-testnet.sh
 
 ## Status
 
-Early development.
+Deployed to Stellar testnet (see [Testnet deployment](#testnet-deployment)).
+Not yet on mainnet.
 
 ## Contributing
 
