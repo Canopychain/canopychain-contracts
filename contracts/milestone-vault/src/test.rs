@@ -3,7 +3,9 @@
 use super::*;
 use soroban_sdk::testutils::{Address as _, Events as _};
 use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
-use soroban_sdk::{vec, IntoVal};
+use soroban_sdk::{vec, BytesN, IntoVal, String};
+
+use project_registry::{ProjectRegistry, ProjectRegistryClient};
 
 fn create_token<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, StellarAssetClient<'a>) {
     let sac = env.register_stellar_asset_contract_v2(admin.clone());
@@ -16,6 +18,7 @@ fn create_token<'a>(env: &Env, admin: &Address) -> (TokenClient<'a>, StellarAsse
 struct Setup<'a> {
     env: Env,
     client: MilestoneVaultClient<'a>,
+    registry: ProjectRegistryClient<'a>,
     admin: Address,
     token: TokenClient<'a>,
     token_admin: StellarAssetClient<'a>,
@@ -24,15 +27,34 @@ struct Setup<'a> {
     attestor: Address,
 }
 
+fn register_project(
+    env: &Env,
+    registry: &ProjectRegistryClient,
+    recipient: &Address,
+    attestor: &Address,
+) -> u64 {
+    registry.register(
+        &Address::generate(env),
+        recipient,
+        attestor,
+        &BytesN::from_array(env, &[7u8; 32]),
+        &String::from_str(env, "Test plot"),
+    )
+}
+
 fn setup() -> Setup<'static> {
     let env = Env::default();
     env.mock_all_auths();
 
+    let admin = Address::generate(&env);
+
+    let registry_id = env.register(ProjectRegistry, ());
+    let registry = ProjectRegistryClient::new(&env, &registry_id);
+    registry.init(&admin);
+
     let contract_id = env.register(MilestoneVault, ());
     let client = MilestoneVaultClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    client.init(&admin);
+    client.init(&admin, &registry_id);
 
     let token_issuer = Address::generate(&env);
     let (token, token_admin) = create_token(&env, &token_issuer);
@@ -41,9 +63,16 @@ fn setup() -> Setup<'static> {
     let recipient = Address::generate(&env);
     let attestor = Address::generate(&env);
 
+    // Project 0, registered and approved: the project every test funds
+    // unless it sets up its own.
+    let project_id = register_project(&env, &registry, &recipient, &attestor);
+    assert_eq!(project_id, 0);
+    registry.approve_project(&project_id);
+
     Setup {
         env,
         client,
+        registry,
         admin,
         token,
         token_admin,
@@ -62,8 +91,14 @@ fn init_sets_admin() {
 #[test]
 fn double_init_fails() {
     let s = setup();
-    let result = s.client.try_init(&s.admin);
+    let result = s.client.try_init(&s.admin, &s.registry.address);
     assert_eq!(result, Err(Ok(Error::AlreadyInitialized)));
+}
+
+#[test]
+fn init_sets_registry() {
+    let s = setup();
+    assert_eq!(s.client.registry(), s.registry.address);
 }
 
 #[test]
@@ -78,14 +113,7 @@ fn first_deposit_opens_vault() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
 
-    let total = s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &600,
-    );
+    let total = s.client.deposit(&s.donor, &0u64, &s.token.address, &600);
     assert_eq!(total, 600);
 
     let vault = s.client.get_vault(&0u64);
@@ -102,29 +130,12 @@ fn first_deposit_opens_vault() {
 }
 
 #[test]
-fn second_deposit_tops_up_and_ignores_new_recipient_attestor() {
+fn second_deposit_tops_up_existing_vault() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
 
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &400,
-    );
-
-    let other_recipient = Address::generate(&s.env);
-    let other_attestor = Address::generate(&s.env);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &other_recipient,
-        &other_attestor,
-        &s.token.address,
-        &200,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &400);
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &200);
 
     let vault = s.client.get_vault(&0u64);
     assert_eq!(vault.total_deposited, 600);
@@ -134,18 +145,67 @@ fn second_deposit_tops_up_and_ignores_new_recipient_attestor() {
 }
 
 #[test]
+fn first_depositor_cannot_choose_recipient_or_attestor() {
+    let s = setup();
+
+    // A fresh project, approved but not yet funded by anyone.
+    let recipient = Address::generate(&s.env);
+    let attestor = Address::generate(&s.env);
+    let project_id = register_project(&s.env, &s.registry, &recipient, &attestor);
+    s.registry.approve_project(&project_id);
+
+    // Whoever deposits first, the vault opens with the registry's addresses.
+    let first_depositor = Address::generate(&s.env);
+    s.token_admin.mint(&first_depositor, &1);
+    s.client
+        .deposit(&first_depositor, &project_id, &s.token.address, &1);
+
+    let vault = s.client.get_vault(&project_id);
+    assert_eq!(vault.recipient, recipient);
+    assert_eq!(vault.attestor, attestor);
+}
+
+#[test]
+fn deposit_into_unregistered_project_fails() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+
+    let result = s
+        .client
+        .try_deposit(&s.donor, &42u64, &s.token.address, &100);
+    assert_eq!(result, Err(Ok(Error::ProjectNotRegistered)));
+
+    assert_eq!(
+        s.client.try_get_vault(&42u64),
+        Err(Ok(Error::VaultNotFound))
+    );
+    assert_eq!(s.token.balance(&s.donor), 1_000);
+}
+
+#[test]
+fn deposit_into_unapproved_project_fails() {
+    let s = setup();
+    s.token_admin.mint(&s.donor, &1_000);
+    let project_id = register_project(&s.env, &s.registry, &s.recipient, &s.attestor);
+
+    let result = s
+        .client
+        .try_deposit(&s.donor, &project_id, &s.token.address, &100);
+    assert_eq!(result, Err(Ok(Error::ProjectNotApproved)));
+
+    assert_eq!(
+        s.client.try_get_vault(&project_id),
+        Err(Ok(Error::VaultNotFound))
+    );
+    assert_eq!(s.token.balance(&s.donor), 1_000);
+}
+
+#[test]
 fn deposit_rejects_non_positive_amount() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
 
-    let result = s.client.try_deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &0,
-    );
+    let result = s.client.try_deposit(&s.donor, &0u64, &s.token.address, &0);
     assert_eq!(result, Err(Ok(Error::InvalidAmount)));
 }
 
@@ -154,27 +214,15 @@ fn deposit_rejects_token_mismatch_on_top_up() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
 
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &100,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &100);
 
     let other_issuer = Address::generate(&s.env);
     let (other_token, other_token_admin) = create_token(&s.env, &other_issuer);
     other_token_admin.mint(&s.donor, &1_000);
 
-    let result = s.client.try_deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &other_token.address,
-        &100,
-    );
+    let result = s
+        .client
+        .try_deposit(&s.donor, &0u64, &other_token.address, &100);
     assert_eq!(result, Err(Ok(Error::TokenMismatch)));
 }
 
@@ -185,22 +233,8 @@ fn deposits_from_different_donors_pool_together() {
     s.token_admin.mint(&s.donor, &1_000);
     s.token_admin.mint(&donor_two, &1_000);
 
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &300,
-    );
-    s.client.deposit(
-        &donor_two,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &300);
+    s.client.deposit(&donor_two, &0u64, &s.token.address, &500);
 
     let vault = s.client.get_vault(&0u64);
     assert_eq!(vault.total_deposited, 800);
@@ -259,14 +293,7 @@ fn configure_milestones_locks_at_first_deposit() {
     s.client.configure_milestones(&0u64, &schedule);
 
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
 
     let result = s.client.try_configure_milestones(&0u64, &schedule);
     assert_eq!(result, Err(Ok(Error::ScheduleAlreadySet)));
@@ -422,14 +449,7 @@ fn configure_milestones_accepts_a_full_retention_floor() {
 fn attest_milestone_releases_tranche_to_recipient() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &1_000,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &1_000);
     s.client
         .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
 
@@ -469,14 +489,7 @@ fn attest_milestone_without_vault_fails() {
 fn attest_milestone_without_schedule_fails() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &1_000,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &1_000);
 
     let result = s.client.try_attest_milestone(&0u64);
     assert_eq!(result, Err(Ok(Error::ScheduleNotFound)));
@@ -486,14 +499,7 @@ fn attest_milestone_without_schedule_fails() {
 fn attest_milestone_past_schedule_end_fails() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &1_000,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &1_000);
     s.client
         .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
 
@@ -515,22 +521,8 @@ fn full_lifecycle_multi_donor_deposit_configure_attest() {
     s.token_admin.mint(&donor_c, &1_000);
 
     // Two donors fund the project before it's approved for milestones.
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &700,
-    );
-    s.client.deposit(
-        &donor_b,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &300,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &700);
+    s.client.deposit(&donor_b, &0u64, &s.token.address, &300);
 
     s.client
         .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
@@ -543,14 +535,7 @@ fn full_lifecycle_multi_donor_deposit_configure_attest() {
     // A third donor tops up the pool between milestones — later tranches
     // are a share of the pool as it stands at attestation time, not a
     // snapshot taken when the schedule was configured.
-    s.client.deposit(
-        &donor_c,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&donor_c, &0u64, &s.token.address, &500);
 
     // Milestone 1: 30% of the now-1,500 pool.
     let payout = s.client.attest_milestone(&0u64);
@@ -581,28 +566,16 @@ fn full_lifecycle_multi_donor_deposit_configure_attest() {
 fn pause_blocks_deposit_and_attest() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
     s.client
         .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
 
     s.client.pause();
     assert!(s.client.paused());
 
-    let result = s.client.try_deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &100,
-    );
+    let result = s
+        .client
+        .try_deposit(&s.donor, &0u64, &s.token.address, &100);
     assert_eq!(result, Err(Ok(Error::ContractPaused)));
 
     let result = s.client.try_attest_milestone(&0u64);
@@ -618,14 +591,7 @@ fn unpause_restores_normal_operation() {
     s.client.unpause();
     assert!(!s.client.paused());
 
-    let total = s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    let total = s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
     assert_eq!(total, 500);
 }
 
@@ -633,14 +599,7 @@ fn unpause_restores_normal_operation() {
 fn set_attestor_rotates_attestor() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
 
     let new_attestor = Address::generate(&s.env);
     s.client.set_attestor(&0u64, &new_attestor);
@@ -661,14 +620,7 @@ fn set_attestor_on_unknown_project_fails() {
 fn cancel_blocks_deposit_and_attest() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
     s.client
         .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
 
@@ -677,14 +629,9 @@ fn cancel_blocks_deposit_and_attest() {
     let vault = s.client.get_vault(&0u64);
     assert!(vault.cancelled);
 
-    let result = s.client.try_deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &100,
-    );
+    let result = s
+        .client
+        .try_deposit(&s.donor, &0u64, &s.token.address, &100);
     assert_eq!(result, Err(Ok(Error::VaultCancelled)));
 
     let result = s.client.try_attest_milestone(&0u64);
@@ -702,14 +649,7 @@ fn cancel_unknown_project_fails() {
 fn refund_before_cancel_fails() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
 
     let result = s.client.try_refund(&0u64, &s.donor);
     assert_eq!(result, Err(Ok(Error::NotCancelled)));
@@ -719,14 +659,7 @@ fn refund_before_cancel_fails() {
 fn refund_with_no_donation_fails() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
     s.client.cancel_project(&0u64);
 
     let stranger = Address::generate(&s.env);
@@ -738,14 +671,7 @@ fn refund_with_no_donation_fails() {
 fn refund_returns_full_amount_when_nothing_released() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &500,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &500);
     s.client.cancel_project(&0u64);
 
     let refunded = s.client.refund(&0u64, &s.donor);
@@ -765,22 +691,8 @@ fn refund_splits_remaining_pool_proportionally_after_partial_release() {
     s.token_admin.mint(&donor_b, &1_000);
 
     // Donor A gives 700, donor B gives 300 -> 1,000 total.
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &700,
-    );
-    s.client.deposit(
-        &donor_b,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &300,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &700);
+    s.client.deposit(&donor_b, &0u64, &s.token.address, &300);
 
     s.client
         .configure_milestones(&0u64, &three_tranche_schedule(&s.env));
@@ -805,14 +717,7 @@ fn refund_splits_remaining_pool_proportionally_after_partial_release() {
 fn attest_milestone_with_zero_payout_bps_transfers_nothing() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &1_000,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &1_000);
 
     // A milestone that exists purely for donor-facing transparency of a
     // waypoint, with no funds attached to it.
@@ -850,14 +755,7 @@ fn attest_milestone_with_zero_payout_bps_transfers_nothing() {
 fn refund_after_full_release_pays_nothing_but_does_not_error() {
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &1_000,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &1_000);
     let full_payout = Vec::from_array(
         &s.env,
         [Milestone {
@@ -894,14 +792,8 @@ fn invariants_hold_across_a_grid_of_deposits_and_schedules() {
         for &payouts in &schedules {
             let s = setup();
             s.token_admin.mint(&s.donor, &deposit_amount);
-            s.client.deposit(
-                &s.donor,
-                &0u64,
-                &s.recipient,
-                &s.attestor,
-                &s.token.address,
-                &deposit_amount,
-            );
+            s.client
+                .deposit(&s.donor, &0u64, &s.token.address, &deposit_amount);
 
             let mut milestones: Vec<Milestone> = Vec::new(&s.env);
             for (i, &payout_bps) in payouts.iter().enumerate() {
@@ -959,14 +851,7 @@ fn refund_invariants_hold_across_a_grid_of_donors_and_partial_releases() {
                 for &amount in splits {
                     let donor = Address::generate(&s.env);
                     s.token_admin.mint(&donor, &amount);
-                    s.client.deposit(
-                        &donor,
-                        &0u64,
-                        &s.recipient,
-                        &s.attestor,
-                        &s.token.address,
-                        &amount,
-                    );
+                    s.client.deposit(&donor, &0u64, &s.token.address, &amount);
                     donors.push_back(donor);
                 }
 
@@ -1029,14 +914,7 @@ fn schedule_summing_under_100_percent_leaves_remainder_stuck_in_vault() {
     // vault, with no further schedule step able to release it.
     let s = setup();
     s.token_admin.mint(&s.donor, &1_000);
-    s.client.deposit(
-        &s.donor,
-        &0u64,
-        &s.recipient,
-        &s.attestor,
-        &s.token.address,
-        &1_000,
-    );
+    s.client.deposit(&s.donor, &0u64, &s.token.address, &1_000);
 
     // Totals 8,000 bps (80%) — 20% is deliberately left unscheduled.
     let schedule = Vec::from_array(

@@ -41,12 +41,12 @@ stellar contract invoke \
   --network "$NETWORK" \
   -- init --admin "$SOURCE_ACCOUNT"
 
-echo "Initializing milestone-vault (admin: $SOURCE_ACCOUNT)..."
+echo "Initializing milestone-vault (admin: $SOURCE_ACCOUNT, registry: $PROJECT_REGISTRY_ID)..."
 stellar contract invoke \
   --id "$MILESTONE_VAULT_ID" \
   --source "$SOURCE_ACCOUNT" \
   --network "$NETWORK" \
-  -- init --admin "$SOURCE_ACCOUNT"
+  -- init --admin "$SOURCE_ACCOUNT" --registry "$PROJECT_REGISTRY_ID"
 
 cat > "$DEPLOYMENTS_FILE" <<EOF
 {

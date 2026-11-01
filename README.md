@@ -8,7 +8,10 @@ real growth, attested on-chain by a trusted attestor service.
 ## Contracts
 
 - `project-registry` — on-chain reforestation project application and registry
-- `milestone-vault` — tranche-release donation vault (deposit / attest / release / refund)
+- `milestone-vault` — tranche-release donation vault (deposit / attest / release / refund).
+  A project's vault opens on its first deposit, and only for a project that
+  is registered and approved in `project-registry`; the vault copies the
+  project's recipient and attestor from the registry at that point.
 
 ## Testnet deployment
 
@@ -54,6 +57,9 @@ are the raw codes a failed transaction reports back to a caller.
 | 11 | `ContractPaused` | An admin has paused the vault, blocking deposits and attestations. |
 | 12 | `NotCancelled` | `refund` was called on a project whose vault hasn't been cancelled. |
 | 13 | `NothingToRefund` | The calling donor has no remaining donation to refund. |
+| 14 | `DepositBelowMinimum` | A deposit amount was below the admin-set minimum (`min_deposit`). |
+| 15 | `ProjectNotRegistered` | A first deposit named a project id that `project-registry` has no project for. |
+| 16 | `ProjectNotApproved` | A first deposit named a project that `project-registry` has not approved yet. |
 
 ## Deploying to testnet
 

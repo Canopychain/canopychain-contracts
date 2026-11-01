@@ -5,6 +5,9 @@ use soroban_sdk::{
 };
 
 mod math;
+mod registry;
+
+use registry::RegistryClient;
 
 /// The pooled donor funds for a single reforestation project.
 ///
@@ -12,6 +15,8 @@ mod math;
 /// per-donor accrual rate to track like a payment stream — instead, a
 /// fraction of `total_deposited` releases to `recipient` each time the
 /// `attestor` confirms a milestone, per the project's milestone schedule.
+/// Both addresses are copied from the project's project-registry entry when
+/// its vault opens.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectVault {
@@ -69,6 +74,9 @@ pub enum DataKey {
     /// The minimum accepted deposit amount, in the deposited token's
     /// smallest unit. Instance storage.
     MinDeposit,
+    /// The project-registry contract this vault reads projects from.
+    /// Instance storage.
+    Registry,
 }
 
 #[contracterror]
@@ -89,6 +97,8 @@ pub enum Error {
     NotCancelled = 12,
     NothingToRefund = 13,
     DepositBelowMinimum = 14,
+    ProjectNotRegistered = 15,
+    ProjectNotApproved = 16,
 }
 
 /// Approximate ledgers per day at a 5-second close time. Used to express
@@ -216,14 +226,24 @@ pub struct MilestoneVault;
 #[allow(deprecated)]
 #[contractimpl]
 impl MilestoneVault {
-    /// Sets the vault admin. Can only be called once.
-    pub fn init(env: Env, admin: Address) -> Result<(), Error> {
+    /// Sets the vault admin and the project-registry contract that projects'
+    /// recipients and attestors are read from. Can only be called once.
+    pub fn init(env: Env, admin: Address, registry: Address) -> Result<(), Error> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(Error::AlreadyInitialized);
         }
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::Registry, &registry);
         extend_instance_ttl(&env);
         Ok(())
+    }
+
+    /// Reads back the project-registry contract set by `init`.
+    pub fn registry(env: Env) -> Result<Address, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Registry)
+            .ok_or(Error::NotInitialized)
     }
 
     /// Reads back the vault admin set by `init`.
@@ -273,17 +293,16 @@ impl MilestoneVault {
     }
 
     /// Deposits `amount` of `token` from `donor` into a project's pool.
-    /// The first deposit for a `project_id` opens its vault, recording
-    /// `recipient` and `attestor` for that project; later deposits into the
-    /// same project ignore those two arguments and top up the existing
-    /// vault instead, so they can't be used to redirect an already-funded
-    /// project's payout or attestation rights.
+    ///
+    /// The first deposit for a `project_id` opens its vault. The project
+    /// must be registered and approved in project-registry, and the vault
+    /// takes its `recipient` and `attestor` from that registry entry, never
+    /// from the caller, so no depositor can choose who gets paid or who
+    /// attests. Later deposits top up the existing vault.
     pub fn deposit(
         env: Env,
         donor: Address,
         project_id: u64,
-        recipient: Address,
-        attestor: Address,
         token: Address,
         amount: i128,
     ) -> Result<i128, Error> {
@@ -306,15 +325,31 @@ impl MilestoneVault {
         let key = DataKey::Vault(project_id);
         let mut vault: ProjectVault = match env.storage().persistent().get(&key) {
             Some(vault) => vault,
-            None => ProjectVault {
-                recipient,
-                attestor,
-                token: token.clone(),
-                total_deposited: 0,
-                total_released: 0,
-                milestones_completed: 0,
-                cancelled: false,
-            },
+            None => {
+                let registry: Address = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::Registry)
+                    .ok_or(Error::NotInitialized)?;
+                let project =
+                    match RegistryClient::new(&env, &registry).try_get_project(&project_id) {
+                        Ok(Ok(project)) => project,
+                        _ => return Err(Error::ProjectNotRegistered),
+                    };
+                if !project.approved {
+                    return Err(Error::ProjectNotApproved);
+                }
+
+                ProjectVault {
+                    recipient: project.recipient,
+                    attestor: project.attestor,
+                    token: token.clone(),
+                    total_deposited: 0,
+                    total_released: 0,
+                    milestones_completed: 0,
+                    cancelled: false,
+                }
+            }
         };
 
         if vault.cancelled {
@@ -422,8 +457,8 @@ impl MilestoneVault {
 
     /// Confirms that the next milestone in a project's schedule has been
     /// reached. Attestor-gated — the attestor recorded against the vault
-    /// (set on the project's first deposit) is the only address that can
-    /// call this. Releases that tranche's share of `total_deposited` to
+    /// (copied from project-registry when the vault opened, or rotated
+    /// since by `set_attestor`) is the only address that can call this. Releases that tranche's share of `total_deposited` to
     /// the recipient and advances `milestones_completed` by one.
     pub fn attest_milestone(env: Env, project_id: u64) -> Result<i128, Error> {
         require_not_paused(&env)?;

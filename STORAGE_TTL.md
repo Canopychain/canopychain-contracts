@@ -30,7 +30,7 @@ instance entry, a longer one for persistent, per-project entries.
 |---|---|---|---|---|
 | project-registry | instance | `Admin`, `NextProjectId` | 30 days | every call to `init`, `register`, `approve_project` |
 | project-registry | persistent | `Project(id)` | 90 days | `register`, `approve_project` for that project |
-| milestone-vault | instance | `Admin`, `Paused` | 30 days | every call to `init`, `deposit`, `configure_milestones`, `attest_milestone`, `pause`, `unpause`, `set_attestor`, `cancel_project` |
+| milestone-vault | instance | `Admin`, `Paused`, `MinDeposit`, `Registry` | 30 days | every call to `init`, `deposit`, `configure_milestones`, `attest_milestone`, `pause`, `unpause`, `set_attestor`, `cancel_project` |
 | milestone-vault | persistent | `Vault(id)` | 90 days | `deposit`, `attest_milestone`, `set_attestor`, `cancel_project` for that project |
 | milestone-vault | persistent | `Donation(id, donor)` | 90 days | `deposit`, `refund` for that donor/project |
 | milestone-vault | persistent | `Schedule(id)` | 90 days | `configure_milestones` for that project |
